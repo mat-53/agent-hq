@@ -20,17 +20,32 @@ button.danger{border-color:#7a3a33;color:#ff9a8c}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .mut{color:var(--mut)}
 .err{color:#ff9a8c}
-#bar{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;pointer-events:none;gap:12px}
-#bar>*{pointer-events:auto}
-.brand{display:flex;align-items:center;gap:12px;background:#1b1410cc;padding:8px 14px;border-radius:10px;border:1px solid var(--line)}
+#bar{position:fixed;top:0;left:0;padding:12px 16px;pointer-events:none}
+.brand{display:flex;align-items:center;gap:12px;background:#1b1410cc;padding:8px 14px;border-radius:10px;border:1px solid var(--line);pointer-events:auto}
 .brand b{font-size:16px;letter-spacing:.3px}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
 .dot.on{background:var(--ok)}
 #empty{position:fixed;left:0;right:0;top:78px;text-align:center;pointer-events:none;text-shadow:0 1px 3px #000}
 #empty b{font-size:18px}
-#panel{position:fixed;top:0;right:0;bottom:0;width:min(360px,100vw);background:var(--panel);border-left:1px solid var(--line);padding:16px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;display:flex;flex-direction:column;gap:10px}
+#fab{position:fixed;left:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:3}
+#fab button{box-shadow:0 2px 8px #0008}
+#chat{position:fixed;left:150px;right:16px;bottom:16px;max-width:860px;display:flex;flex-direction:column;gap:6px;z-index:3}
+body.panel-open #chat{right:376px}
+#chatLog{display:none;max-height:min(200px,28vh);overflow-y:auto;background:#1b1410ee;border:1px solid var(--line);border-radius:12px;padding:10px 12px;flex-direction:column;gap:6px}
+#chat.open #chatLog{display:flex}
+.msg{white-space:pre-wrap;word-break:break-word;padding:6px 10px;border-radius:10px;max-width:92%}
+.msg.user{align-self:flex-end;background:#5a3f24}
+.msg.director{align-self:flex-start;background:#3a2f27;border:1px solid #6b5a2a}
+.msg.system{align-self:stretch;max-width:100%;color:var(--mut);font-size:12.5px;background:none;padding:1px 4px}
+.chatbar{display:flex;gap:8px;background:#1b1410ee;border:1px solid var(--line);border-radius:12px;padding:8px}
+.chatbar input{flex:1;min-width:0}
+#chatMeta{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--mut);padding:0 6px;text-shadow:0 1px 2px #000}
+#chatMeta label{display:flex;align-items:center;gap:6px;cursor:pointer}
+#chatMeta input{width:auto}
+#panel{position:fixed;top:0;right:0;bottom:0;width:min(360px,100vw);background:var(--panel);border-left:1px solid var(--line);padding:16px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;z-index:4}
 #panel.open{transform:none}
-#panel header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.view{display:flex;flex-direction:column;gap:10px}
+.view header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
 #panel h2{margin:0;font-size:18px;word-break:break-word}
 #panel h3{margin:6px 0 0;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut)}
 #panel label{font-weight:600}
@@ -42,57 +57,105 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#17100c;borde
 .pill.working{background:#5c4d12;color:var(--work)}
 .pill.done{background:#1d4227;color:var(--ok)}
 .pill.failed{background:#4d211c;color:#ff9a8c}
+.pill.director{background:#5a4a12;color:#ffd76a;margin-left:6px}
 details summary{cursor:pointer;color:var(--mut)}
 #pHist details{margin:6px 0}
 #pHist summary{color:var(--txt)}
-footer{margin-top:auto;padding-top:10px}
-.modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:16px;z-index:5}
-.modal[hidden]{display:none}
+#jList{display:flex;flex-direction:column;gap:6px}
+#jList button{text-align:left}
+.modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:16px;z-index:6}
 .modal form{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;width:min(440px,100%);display:flex;flex-direction:column;gap:12px;max-height:100%;overflow:auto}
 .modal h2{margin:0}
 .modal label{display:flex;flex-direction:column;gap:5px;font-weight:600}
+.modal label.check{flex-direction:row;align-items:center;gap:8px;font-weight:400}
+.modal label.check input{width:auto}
 .modal p{margin:0;min-height:1em}
 .modal .row{justify-content:flex-end}
-#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#3a1d19;border:1px solid #7a3a33;padding:9px 16px;border-radius:10px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .2s;z-index:9}
+#toast{position:fixed;left:50%;top:18px;transform:translateX(-50%);background:#3a1d19;border:1px solid #7a3a33;padding:9px 16px;border-radius:10px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .2s;z-index:9}
 #toast.show{opacity:1}
 @media (prefers-reduced-motion:reduce){#panel{transition:none}}
+@media (max-width:700px){#chat{left:16px;bottom:120px}body.panel-open #chat{right:16px}}
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
 
-<div id="bar">
-  <div class="brand"><b>Agent HQ</b><span id="stats" class="mut"></span><span id="conn" class="dot" title="Server connection"></span></div>
-  <button id="addBtn" class="primary">+ Add agent</button>
-</div>
-<div id="empty" hidden><b>No agents yet</b><br><span class="mut">Click the glowing platform (or “Add agent”) to create your first one.</span></div>
+<div id="bar"><div class="brand"><b>Agent HQ</b><span id="stats" class="mut"></span><span id="conn" class="dot" title="Server connection"></span></div></div>
+<div id="empty" hidden><b>No platforms yet</b><br><span class="mut">Click the glowing spot to create your first platform (for example “Headquarters”).</span></div>
 
-<aside id="panel" aria-label="Agent details">
-  <header>
-    <div><h2 id="pName"></h2><div id="pMeta" class="mut"></div></div>
-    <button id="pClose" aria-label="Close panel">✕</button>
-  </header>
-  <div id="pStatus" class="pill"></div>
-  <details><summary>Role / instructions</summary><pre id="pRole"></pre></details>
-  <label for="pTask">Assign a task</label>
-  <textarea id="pTask" rows="4" placeholder="What should this agent do?"></textarea>
-  <div class="row"><button id="pRun" class="primary">Run task</button><span class="mut">Ctrl+Enter</span></div>
-  <h3>Result</h3>
-  <pre id="pOut"></pre>
-  <details><summary>History</summary><div id="pHist"></div></details>
-  <footer><button id="pDel" class="danger">Delete agent</button></footer>
+<div id="fab">
+  <button id="addAgent" class="primary">+ Agent</button>
+  <button id="addPlat">+ Platform</button>
+</div>
+
+<div id="chat">
+  <div id="chatLog" aria-live="polite"></div>
+  <div class="chatbar">
+    <button id="chatToggle" title="Show or hide the conversation" aria-label="Toggle conversation">▲</button>
+    <input id="chatIn" maxlength="4000" autocomplete="off">
+    <button id="chatSend" class="primary">Send</button>
+  </div>
+  <div id="chatMeta"><span id="chatStatus"></span><label><input id="autoRev" type="checkbox">Director follows up when agents finish</label></div>
+</div>
+
+<aside id="panel" aria-label="Details">
+  <div id="agentView" class="view" hidden>
+    <header>
+      <div><h2 id="pName"></h2><div id="pMeta" class="mut"></div></div>
+      <button id="pClose" aria-label="Close panel">✕</button>
+    </header>
+    <div class="row"><div id="pStatus" class="pill"></div><span id="pDirTag" class="pill director" hidden>Director</span></div>
+    <details><summary>Role / instructions</summary><pre id="pRole"></pre></details>
+    <div id="taskBox" class="view">
+      <label for="pTask">Assign a task</label>
+      <textarea id="pTask" rows="4" placeholder="What should this agent do?"></textarea>
+      <div class="row"><button id="pRun" class="primary">Run task</button><span class="mut">Ctrl+Enter</span></div>
+    </div>
+    <p id="dirNote" class="mut" hidden>This is the Director. Talk to it in the chat bar at the bottom.</p>
+    <h3>Result</h3>
+    <pre id="pOut"></pre>
+    <details><summary>Notes file (what teammates see)</summary><pre id="pNotes"></pre></details>
+    <details><summary>History</summary><div id="pHist"></div></details>
+    <button id="pDir">Make this agent the Director</button>
+    <button id="pDel" class="danger">Delete agent</button>
+  </div>
+  <div id="projView" class="view" hidden>
+    <header>
+      <div><h2 id="jName"></h2><div id="jDesc" class="mut"></div></div>
+      <button id="jClose" aria-label="Close panel">✕</button>
+    </header>
+    <h3>Agents on this platform</h3>
+    <div id="jList"></div>
+    <button id="jAdd" class="primary">+ Add agent here</button>
+    <button id="jDel" class="danger">Delete platform</button>
+  </div>
 </aside>
 
 <div id="modal" class="modal" hidden>
   <form id="mForm">
     <h2>New agent</h2>
     <label>Name<input id="mName" maxlength="40" required autocomplete="off"></label>
-    <label>Role / instructions<textarea id="mRole" rows="4" maxlength="2000" placeholder="e.g. You write clean Python. Reply with code only."></textarea></label>
+    <label>Role / instructions<textarea id="mRole" rows="4" maxlength="2000" placeholder="e.g. You research questions on the internet and report sources."></textarea></label>
+    <label>Platform<select id="mProject"></select></label>
     <label>Worker<select id="mBackend"></select></label>
-    <label id="mModelWrap">Model<input id="mModel" maxlength="100" autocomplete="off"></label>
+    <label id="mModelWrap">Model
+      <select id="mModelSel" hidden></select>
+      <input id="mModel" maxlength="100" autocomplete="off">
+    </label>
+    <label class="check"><input id="mDir" type="checkbox">Make this agent the Director</label>
     <p id="mHint" class="mut"></p>
     <p id="mErr" class="err" role="alert"></p>
     <div class="row"><button type="button" id="mCancel">Cancel</button><button id="mSubmit" class="primary">Create agent</button></div>
+  </form>
+</div>
+
+<div id="pmodal" class="modal" hidden>
+  <form id="pForm">
+    <h2>New platform</h2>
+    <label>Name<input id="nName" maxlength="40" required autocomplete="off" placeholder="e.g. Research"></label>
+    <label>What is this project about?<textarea id="nDesc" rows="3" maxlength="500"></textarea></label>
+    <p id="nErr" class="err" role="alert"></p>
+    <div class="row"><button type="button" id="nCancel">Cancel</button><button id="nSubmit" class="primary">Create platform</button></div>
   </form>
 </div>
 <div id="toast" role="status"></div>
@@ -109,27 +172,28 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
-let state = { agents: [], backends: [] };
-let selected = null, hover = null, curDt = 0;
+let state = { projects: [], agents: [], backends: [], chat: [], busy: false, autoReview: true, director: null };
+let selected = null, selProj = null, hover = null, placing = false, pendingSlot = null, curDt = 0;
 const anim = new Map(), drafts = new Map();
 const cam = { tx: 0, ty: 0, s: 1, init: false };
-const R = 64, T = 12, SQ3 = Math.sqrt(3);
+const PR = 170, T = 16, SQ3 = Math.sqrt(3), ROBOT = 1.25;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DIRS = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+const hueOf = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+const shorten = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+const slotPos = (q, r) => ({ x: PR * SQ3 * (q + r / 2), y: PR * 1.5 * r });
+const agentsOf = pid => state.agents.filter(a => a.project === pid);
 
-// ---------- hex grid (spiral of slots around the centre) ----------
-const DIRS = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
-const slotCache = [[0, 0]]; let ringN = 0;
-function slotAxial(i) {
-  while (slotCache.length <= i) {
-    ringN++;
-    let q = -ringN, r = ringN;
-    for (let d = 0; d < 6; d++) for (let j = 0; j < ringN; j++) { slotCache.push([q, r]); q += DIRS[d][0]; r += DIRS[d][1]; }
+function freeSlots() {
+  if (!state.projects.length) return [[0, 0]];
+  const taken = new Set(state.projects.map(p => p.q + ',' + p.r)), out = new Map();
+  for (const p of state.projects) for (const [dq, dr] of DIRS) {
+    const q = p.q + dq, r = p.r + dr, k = q + ',' + r;
+    if (!taken.has(k)) out.set(k, [q, r]);
   }
-  return slotCache[i];
+  return [...out.values()];
 }
-function slotPos(i) { const [q, r] = slotAxial(i); return { x: R * SQ3 * (q + r / 2), y: R * 1.5 * r }; }
-function nextSlot() { const used = new Set(state.agents.map(a => a.slot)); let i = 0; while (used.has(i)) i++; return i; }
-const hueOf = slot => (slot * 57 + 20) % 360;
+const showSlots = () => placing || !state.projects.length;
 
 function hexPath(cx, cy, rad) {
   ctx.beginPath();
@@ -139,23 +203,22 @@ function hexPath(cx, cy, rad) {
   }
   ctx.closePath();
 }
-function inHex(dx, dy) {
-  const rad = R - 5; dx = Math.abs(dx); dy = Math.abs(dy);
-  return dx <= rad * SQ3 / 2 && dy <= rad - dx / SQ3;
-}
+function inHex(dx, dy, rad) { dx = Math.abs(dx); dy = Math.abs(dy); return dx <= rad * SQ3 / 2 && dy <= rad - dx / SQ3; }
 
 // ---------- camera ----------
 function updateCamera() {
-  const slots = state.agents.map(a => a.slot).concat([nextSlot()]);
+  const pts = state.projects.map(p => slotPos(p.q, p.r));
+  if (showSlots()) for (const [q, r] of freeSlots()) pts.push(slotPos(q, r));
+  if (!pts.length) pts.push({ x: 0, y: 0 });
   let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
-  for (const s of slots) {
-    const p = slotPos(s);
-    x0 = Math.min(x0, p.x - R); x1 = Math.max(x1, p.x + R);
-    y0 = Math.min(y0, p.y - R - 40); y1 = Math.max(y1, p.y + R + T + 30);
+  for (const p of pts) {
+    x0 = Math.min(x0, p.x - PR); x1 = Math.max(x1, p.x + PR);
+    y0 = Math.min(y0, p.y - PR - 100); y1 = Math.max(y1, p.y + PR + T + 50);
   }
-  const panelW = selected && W > 700 ? 360 : 0;
-  const s = Math.max(0.45, Math.min(1.25, (W - panelW - 60) / (x1 - x0), (H - 150) / (y1 - y0)));
-  const tx = (W - panelW) / 2 - (x0 + x1) / 2 * s, ty = (H + 40) / 2 - (y0 + y1) / 2 * s;
+  const panelW = (selected || selProj) && W > 700 ? 360 : 0;
+  const bottom = $('#chat').offsetHeight + 28, top = 56;
+  const s = Math.max(0.3, Math.min(1.1, (W - panelW - 60) / (x1 - x0), (H - top - bottom) / (y1 - y0)));
+  const tx = (W - panelW) / 2 - (x0 + x1) / 2 * s, ty = (top + H - bottom) / 2 - (y0 + y1) / 2 * s;
   if (!cam.init) { Object.assign(cam, { tx, ty, s, init: true }); return; }
   const k = reduceMotion ? 1 : 0.12;
   cam.tx += (tx - cam.tx) * k; cam.ty += (ty - cam.ty) * k; cam.s += (s - cam.s) * k;
@@ -169,8 +232,7 @@ function drawBackground() {
   const sun = ctx.createRadialGradient(W * 0.78, H * 0.28, 0, W * 0.78, H * 0.28, H * 0.35);
   sun.addColorStop(0, 'rgba(255,190,110,.55)'); sun.addColorStop(1, 'rgba(255,190,110,0)');
   ctx.fillStyle = sun; ctx.fillRect(0, 0, W, H);
-  const bands = [['#7a5530', 0.66, 0.05, 0.6], ['#8f6a3c', 0.78, 0.06, 0.9], ['#a57b45', 0.9, 0.07, 1.2]];
-  for (const [c, base, amp, par] of bands) {
+  for (const [c, base, amp, par] of [['#7a5530', 0.66, 0.05, 0.6], ['#8f6a3c', 0.78, 0.06, 0.9], ['#a57b45', 0.9, 0.07, 1.2]]) {
     ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(0, H);
     for (let x = 0; x <= W + 20; x += 20) {
       const u = x + cam.tx * par * 0.3;
@@ -181,30 +243,31 @@ function drawBackground() {
 }
 
 function drawPlatform(x, y, hue, lift) {
-  const rad = R - 5;
+  const rad = PR - 6;
   ctx.fillStyle = 'rgba(0,0,0,.25)';
-  ctx.beginPath(); ctx.ellipse(x + 8, y + T + 12, rad * 0.95, rad * 0.55, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + 14, y + T + 26, rad * 0.95, rad * 0.55, 0, 0, 7); ctx.fill();
   ctx.fillStyle = `hsl(${hue} 45% 28%)`;
   for (let d = T; d >= 0; d -= 3) { hexPath(x, y - lift + d, rad); ctx.fill(); }
   const g = ctx.createLinearGradient(x, y - rad - lift, x, y + rad - lift);
-  g.addColorStop(0, `hsl(${hue} 60% 64%)`); g.addColorStop(1, `hsl(${hue} 55% 47%)`);
+  g.addColorStop(0, `hsl(${hue} 55% 60%)`); g.addColorStop(1, `hsl(${hue} 50% 44%)`);
   ctx.fillStyle = g; hexPath(x, y - lift, rad); ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2; ctx.stroke();
-  ctx.strokeStyle = 'rgba(0,0,0,.15)'; hexPath(x, y - lift, rad * 0.78); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.13)'; ctx.lineWidth = 2;
+  for (const k of [0.82, 0.55]) { hexPath(x, y - lift, rad * k); ctx.stroke(); }
 }
 
-function drawGhost(t) {
-  const p = slotPos(nextSlot()), hov = hover === 'ghost', pulse = 0.5 + 0.5 * Math.sin(t * 2.2);
+function drawGhost(q, r, t, hov) {
+  const p = slotPos(q, r), pulse = 0.5 + 0.5 * Math.sin(t * 2.2);
   ctx.save();
-  ctx.setLineDash([10, 8]); ctx.lineDashOffset = -t * 12;
-  ctx.strokeStyle = `rgba(255,240,210,${0.45 + pulse * 0.3 + (hov ? 0.25 : 0)})`; ctx.lineWidth = 3;
+  ctx.setLineDash([16, 12]); ctx.lineDashOffset = -t * 14;
+  ctx.strokeStyle = `rgba(255,240,210,${0.45 + pulse * 0.3 + (hov ? 0.25 : 0)})`; ctx.lineWidth = 4;
   ctx.fillStyle = `rgba(255,240,210,${0.05 + pulse * 0.04 + (hov ? 0.1 : 0)})`;
-  hexPath(p.x, p.y, R - 5); ctx.fill(); ctx.stroke();
+  hexPath(p.x, p.y, PR - 6); ctx.fill(); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.strokeStyle = `rgba(255,240,210,${0.7 + (hov ? 0.3 : 0)})`; ctx.lineWidth = 4; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(p.x - 12, p.y); ctx.lineTo(p.x + 12, p.y); ctx.moveTo(p.x, p.y - 12); ctx.lineTo(p.x, p.y + 12); ctx.stroke();
-  ctx.font = '600 13px system-ui,"Segoe UI",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillStyle = 'rgba(255,240,210,.9)'; ctx.fillText('Add agent', p.x, p.y + R);
+  ctx.strokeStyle = `rgba(255,240,210,${0.7 + (hov ? 0.3 : 0)})`; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(p.x - 20, p.y); ctx.lineTo(p.x + 20, p.y); ctx.moveTo(p.x, p.y - 20); ctx.lineTo(p.x, p.y + 20); ctx.stroke();
+  ctx.font = '600 16px system-ui,"Segoe UI",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,240,210,.95)'; ctx.fillText('New platform', p.x, p.y + 34);
   ctx.restore();
 }
 
@@ -226,13 +289,13 @@ function drawMachine(x, y, a, t) {
   ctx.restore();
 }
 
-function drawRobot(x, y, a, t, an) {
+function drawRobot(a, t, an) {
   const st = a.status, working = st === 'working', failed = st === 'failed', done = st === 'done';
-  const bob = working ? Math.sin(t * 12) * 1.4 : Math.sin(t * 2 + an.seed) * 1.1;
+  const bob = working ? Math.sin(t * 12) * 1.4 : an.moving ? Math.sin(t * 10) * 1.7 : Math.sin(t * 2 + an.seed) * 1.1;
   let hop = 0;
   if (an.hopUntil > t) { const u = (an.hopUntil - t) / 0.7; hop = -Math.abs(Math.sin(u * Math.PI * 2)) * 16 * u; }
   const shake = an.shakeUntil > t ? Math.sin(t * 60) * 2 : 0;
-  ctx.save(); ctx.translate(x + shake, y + hop);
+  ctx.save(); ctx.translate(shake, hop);
   ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, 0, 15, 5, 0, 0, 7); ctx.fill();
   ctx.translate(0, bob * 0.5);
   ctx.fillStyle = '#8c8377'; ctx.fillRect(-9, -8, 6, 8); ctx.fillRect(3, -8, 6, 8);
@@ -241,7 +304,7 @@ function drawRobot(x, y, a, t, an) {
   const ang = working ? Math.sin(t * 14) * 0.9 : done ? 2.7 + Math.sin(t * 6) * 0.3 : 0.2;
   ctx.beginPath(); ctx.moveTo(14, -26); ctx.lineTo(14 + Math.sin(ang) * 14, -26 + Math.cos(ang) * 14); ctx.stroke();
   ctx.fillStyle = '#d9d4cc'; ctx.beginPath(); ctx.roundRect(-14, -38, 28, 32, 6); ctx.fill();
-  ctx.fillStyle = `hsl(${hueOf(a.slot)} 70% 55%)`; ctx.fillRect(-14, -24, 28, 5);
+  ctx.fillStyle = a.isDirector ? '#f5c542' : `hsl(${hueOf(a.id)} 70% 55%)`; ctx.fillRect(-14, -24, 28, 5);
   ctx.save(); ctx.translate(0, -38); if (failed) ctx.rotate(0.22);
   ctx.fillStyle = '#e6e1d9'; ctx.beginPath(); ctx.roundRect(-12, -18, 24, 18, 5); ctx.fill();
   ctx.fillStyle = '#20242b'; ctx.beginPath(); ctx.roundRect(-9, -14, 18, 9, 3); ctx.fill();
@@ -257,6 +320,10 @@ function drawRobot(x, y, a, t, an) {
   ctx.strokeStyle = '#bdb5a9'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(0, -25); ctx.stroke();
   ctx.fillStyle = working ? (Math.sin(t * 9) > 0 ? '#f5d24a' : '#8a7a2a') : done ? '#6fcf7f' : failed ? '#ef6a5b' : '#7c8a99';
   ctx.beginPath(); ctx.arc(0, -27, 3.2, 0, 7); ctx.fill();
+  if (a.isDirector) {
+    ctx.fillStyle = '#f5c542'; ctx.strokeStyle = '#b8901f'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-9, -31); ctx.lineTo(-9, -41); ctx.lineTo(-4.5, -35); ctx.lineTo(0, -44); ctx.lineTo(4.5, -35); ctx.lineTo(9, -41); ctx.lineTo(9, -31); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
   ctx.restore(); ctx.restore();
 }
 
@@ -269,18 +336,28 @@ function drawBadge(x, y, kind) {
   ctx.stroke(); ctx.restore();
 }
 
-const shorten = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
 function drawLabel(x, y, a, t) {
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = '600 13px system-ui,"Segoe UI",sans-serif';
   let name = a.name;
-  while (name.length > 1 && ctx.measureText(name).width > 74) name = name.slice(0, -1);
+  while (name.length > 1 && ctx.measureText(name).width > 84) name = name.slice(0, -1);
   if (name !== a.name) name = name.slice(0, -1) + '…';
   const w = ctx.measureText(name).width + 30, h = 22, left = x - w / 2;
-  ctx.fillStyle = 'rgba(20,12,8,.75)'; ctx.beginPath(); ctx.roundRect(left, y, w, h, 11); ctx.fill();
+  ctx.fillStyle = 'rgba(20,12,8,.78)'; ctx.beginPath(); ctx.roundRect(left, y, w, h, 11); ctx.fill();
   ctx.fillStyle = { idle: '#9aa4b0', working: Math.sin(t * 9) > 0 ? '#f5d24a' : '#8a7a2a', done: '#6fcf7f', failed: '#ef6a5b' }[a.status];
   ctx.beginPath(); ctx.arc(left + 12, y + h / 2, 4, 0, 7); ctx.fill();
-  ctx.fillStyle = '#fff8ee'; ctx.fillText(name, left + 22, y + h / 2 + 0.5);
+  ctx.fillStyle = a.isDirector ? '#ffd76a' : '#fff8ee'; ctx.fillText(name, left + 22, y + h / 2 + 0.5);
+}
+
+function drawBanner(p, x, y) {
+  const n = agentsOf(p.id).length;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = '700 20px system-ui,"Segoe UI",sans-serif';
+  ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = 6;
+  ctx.fillStyle = '#fff8ee'; ctx.fillText(shorten(p.name, 26), x, y);
+  ctx.shadowBlur = 0;
+  ctx.font = '12px system-ui,"Segoe UI",sans-serif'; ctx.fillStyle = 'rgba(255,240,220,.85)';
+  ctx.fillText(`${n} agent${n === 1 ? '' : 's'}`, x, y + 25);
 }
 
 // ---------- particles ----------
@@ -298,40 +375,67 @@ function stepParticles(dt) {
   ctx.globalAlpha = 1;
 }
 
+// ---------- agents walking around their platform ----------
 function animFor(a) {
   let an = anim.get(a.id);
-  if (!an) { an = { seed: Math.random() * 6.28, prev: a.status, hopUntil: 0, shakeUntil: 0, emit: 0 }; anim.set(a.id, an); }
+  if (!an) { an = { seed: Math.random() * 6.28, prev: a.status, hopUntil: 0, shakeUntil: 0, emit: 0, pos: null, target: null, wait: 0, moving: false, desk: { x: 0, y: 0 } }; anim.set(a.id, an); }
   return an;
 }
-
-function drawAgent(a, t) {
-  const p = slotPos(a.slot), hue = hueOf(a.slot), an = animFor(a);
-  const lift = (hover === a.id ? 4 : 0) + (selected === a.id ? 3 : 0), working = a.status === 'working';
-  drawPlatform(p.x, p.y, hue, lift);
-  if (selected === a.id) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; hexPath(p.x, p.y - lift, R - 5); ctx.stroke(); }
-  if (working) {
-    ctx.save(); ctx.setLineDash([14, 10]); ctx.lineDashOffset = -t * 40;
-    ctx.strokeStyle = '#f5d24a'; ctx.lineWidth = 4; hexPath(p.x, p.y - lift, R - 11); ctx.stroke(); ctx.restore();
+function stepAgent(a, idx, n, dt) {
+  const an = animFor(a);
+  const ang = -Math.PI / 2 + (n ? idx / n : 0) * Math.PI * 2;
+  an.desk = { x: Math.cos(ang) * 100, y: Math.sin(ang) * 90 };
+  const stand = { x: an.desk.x - 26, y: an.desk.y + 24 };
+  if (!an.pos) an.pos = { x: stand.x, y: stand.y };
+  let goal = null, speed = 42;
+  if (a.status === 'working' || reduceMotion) { goal = stand; speed = 120; }
+  else {
+    if (!an.target) { const r = 100 * Math.sqrt(Math.random()), g = Math.random() * 6.283; an.target = { x: Math.cos(g) * r, y: Math.sin(g) * r * 0.9 }; an.wait = 0; }
+    if (Math.hypot(an.target.x - an.pos.x, an.target.y - an.pos.y) < 4) { an.wait += dt; if (an.wait > 1 + an.seed % 3) an.target = null; }
+    else goal = an.target;
   }
-  drawMachine(p.x + 26, p.y - lift + 6, a, t);
-  drawRobot(p.x - 8, p.y - lift + 8, a, t, an);
-  an.emit -= curDt;
-  if (an.emit <= 0 && !reduceMotion) {
-    if (working) {
-      an.emit = 0.07;
-      emit({ x: p.x + 26 + (Math.random() - 0.5) * 10, y: p.y - lift - 18, vx: (Math.random() - 0.5) * 80, vy: -40 - Math.random() * 40, g: 160, life: 0.5, max: 0.5, size: 2.2, color: Math.random() > 0.5 ? '#ffd45a' : '#ff9a3c' });
-    } else if (a.status === 'failed') {
-      an.emit = 0.25;
-      emit({ x: p.x - 8 + (Math.random() - 0.5) * 6, y: p.y - lift - 34, vx: (Math.random() - 0.5) * 10, vy: -22, g: 0, life: 1.2, max: 1.2, size: 5, color: '#777', smoke: true });
-    }
+  an.moving = false;
+  if (goal) {
+    const dx = goal.x - an.pos.x, dy = goal.y - an.pos.y, d = Math.hypot(dx, dy);
+    if (d > 2) { const s = Math.min(d, speed * dt); an.pos.x += dx / d * s; an.pos.y += dy / d * s; an.moving = d > 3; }
   }
 }
 
-function drawOverlays(a, t) {
-  const p = slotPos(a.slot), an = animFor(a);
-  const lift = (hover === a.id ? 4 : 0) + (selected === a.id ? 3 : 0);
-  if (a.status === 'done' || a.status === 'failed') drawBadge(p.x - 8, p.y - lift - 62 + Math.sin(t * 3 + an.seed) * 2, a.status);
-  drawLabel(p.x, p.y - lift + 36, a, t);
+function drawProject(p, t) {
+  const pos = slotPos(p.q, p.r), list = agentsOf(p.id);
+  const lift = (hover === 'p:' + p.id ? 4 : 0) + (selProj === p.id ? 3 : 0);
+  drawPlatform(pos.x, pos.y, hueOf(p.id), lift);
+  if (selProj === p.id) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; hexPath(pos.x, pos.y - lift, PR - 6); ctx.stroke(); }
+  list.forEach((a, i) => stepAgent(a, i, list.length, curDt));
+  for (const a of list) {
+    const an = animFor(a), dx = pos.x + an.desk.x, dy = pos.y - lift + an.desk.y;
+    ctx.save(); ctx.translate(dx, dy); ctx.scale(ROBOT, ROBOT); drawMachine(0, 0, a, t); ctx.restore();
+    an.emit -= curDt;
+    if (an.emit <= 0 && !reduceMotion) {
+      if (a.status === 'working') {
+        an.emit = 0.07;
+        emit({ x: dx + (Math.random() - 0.5) * 10, y: dy - 34, vx: (Math.random() - 0.5) * 80, vy: -40 - Math.random() * 40, g: 160, life: 0.5, max: 0.5, size: 2.4, color: Math.random() > 0.5 ? '#ffd45a' : '#ff9a3c' });
+      } else if (a.status === 'failed') {
+        an.emit = 0.25;
+        emit({ x: pos.x + an.pos.x + (Math.random() - 0.5) * 6, y: pos.y - lift + an.pos.y - 62, vx: (Math.random() - 0.5) * 10, vy: -22, g: 0, life: 1.2, max: 1.2, size: 5, color: '#777', smoke: true });
+      }
+    }
+  }
+  const sorted = list.slice().sort((a, b) => anim.get(a.id).pos.y - anim.get(b.id).pos.y);
+  for (const a of sorted) {
+    const an = anim.get(a.id);
+    ctx.save(); ctx.translate(pos.x + an.pos.x, pos.y - lift + an.pos.y); ctx.scale(ROBOT, ROBOT); drawRobot(a, t, an); ctx.restore();
+  }
+  return { pos, lift, sorted };
+}
+
+function drawOverlays(p, info, t) {
+  for (const a of info.sorted) {
+    const an = anim.get(a.id), x = info.pos.x + an.pos.x, y = info.pos.y - info.lift + an.pos.y;
+    if (a.status === 'done' || a.status === 'failed') drawBadge(x + 22, y - 84 + Math.sin(t * 3 + an.seed) * 2, a.status);
+    drawLabel(x, y + 10, a, t);
+  }
+  drawBanner(p, info.pos.x, info.pos.y + PR + T + 8);
 }
 
 function draw(t) {
@@ -339,11 +443,11 @@ function draw(t) {
   ctx.setTransform(d, 0, 0, d, 0, 0);
   drawBackground();
   ctx.save(); ctx.translate(cam.tx, cam.ty); ctx.scale(cam.s, cam.s);
-  const items = state.agents.slice().sort((a, b) => slotPos(a.slot).y - slotPos(b.slot).y);
-  drawGhost(t);
-  for (const a of items) drawAgent(a, t);
+  if (showSlots()) for (const [q, r] of freeSlots()) drawGhost(q, r, t, hover === `s:${q},${r}`);
+  const order = state.projects.slice().sort((a, b) => slotPos(a.q, a.r).y - slotPos(b.q, b.r).y);
+  const infos = order.map(p => [p, drawProject(p, t)]);
   stepParticles(curDt);
-  for (const a of items) drawOverlays(a, t);
+  for (const [p, info] of infos) drawOverlays(p, info, t);
   ctx.restore();
 }
 
@@ -358,15 +462,29 @@ requestAnimationFrame(frame);
 // ---------- interaction ----------
 function pick(mx, my) {
   const wx = (mx - cam.tx) / cam.s, wy = (my - cam.ty) / cam.s;
-  for (const a of state.agents) { const p = slotPos(a.slot); if (inHex(wx - p.x, wy - p.y)) return a.id; }
-  const g = slotPos(nextSlot());
-  return inHex(wx - g.x, wy - g.y) ? 'ghost' : null;
+  let best = null, bestY = -1e9;
+  for (const p of state.projects) {
+    const pp = slotPos(p.q, p.r);
+    for (const a of agentsOf(p.id)) {
+      const an = anim.get(a.id); if (!an || !an.pos) continue;
+      const rx = pp.x + an.pos.x, ry = pp.y + an.pos.y;
+      if (Math.abs(wx - rx) < 26 && wy > ry - 90 && wy < ry + 14 && ry > bestY) { best = 'a:' + a.id; bestY = ry; }
+    }
+  }
+  if (best) return best;
+  for (const p of state.projects) { const pp = slotPos(p.q, p.r); if (inHex(wx - pp.x, wy - pp.y, PR - 8)) return 'p:' + p.id; }
+  if (showSlots()) for (const [q, r] of freeSlots()) { const g = slotPos(q, r); if (inHex(wx - g.x, wy - g.y, PR - 8)) return `s:${q},${r}`; }
+  return null;
 }
 cv.addEventListener('pointermove', e => { hover = pick(e.clientX, e.clientY); cv.style.cursor = hover ? 'pointer' : 'default'; });
 cv.addEventListener('pointerleave', () => { hover = null; });
 cv.addEventListener('click', e => {
   const h = pick(e.clientX, e.clientY);
-  if (h === 'ghost') openModal(); else if (h) openPanel(h); else closePanel();
+  if (!h) { placing = false; closePanel(); return; }
+  const [kind, val] = [h[0], h.slice(2)];
+  if (kind === 's') { const [q, r] = val.split(',').map(Number); openPlatModal(q, r); }
+  else if (kind === 'p') openProj(val);
+  else openPanel(val);
 });
 
 // ---------- API + live state ----------
@@ -395,42 +513,89 @@ function onState(s) {
   }
   for (const id of [...anim.keys()]) if (!ids.has(id)) anim.delete(id);
   state = s;
-  const n = s.agents.length, w = s.agents.filter(a => a.status === 'working').length;
-  $('#stats').textContent = n ? `${n} agent${n > 1 ? 's' : ''}${w ? ' · ' + w + ' working' : ''}` : '';
-  $('#empty').hidden = n > 0;
+  const w = s.agents.filter(a => a.status === 'working').length;
+  $('#stats').textContent = s.projects.length ? `${s.projects.length} platform${s.projects.length > 1 ? 's' : ''} · ${s.agents.length} agent${s.agents.length === 1 ? '' : 's'}${w ? ' · ' + w + ' working' : ''}` : '';
+  $('#empty').hidden = s.projects.length > 0;
   if (selected) refreshPanel();
+  if (selProj) refreshProj();
+  renderChat();
 }
 const es = new EventSource('/api/events');
 es.onmessage = e => onState(JSON.parse(e.data));
 es.onopen = () => $('#conn').classList.add('on');
 es.onerror = () => $('#conn').classList.remove('on');
 
-// ---------- detail panel ----------
-const cur = () => state.agents.find(a => a.id === selected);
-const backendLabel = id => (state.backends.find(b => b.id === id) || {}).label || id;
-let histSig = '';
-function openPanel(id) {
-  selected = id; histSig = '';
-  $('#panel').classList.add('open');
-  $('#pTask').value = drafts.get(id) || '';
-  if (cur()) refreshPanel();
+// ---------- Director chat ----------
+let chatOpen = true, chatSig = '';
+function renderChat() {
+  const msgs = state.chat, last = msgs.length ? msgs[msgs.length - 1].ts : 0;
+  const sig = msgs.length + ':' + last;
+  if (sig !== chatSig) {
+    chatSig = sig;
+    const log = $('#chatLog'); log.replaceChildren();
+    for (const m of msgs) {
+      const d = document.createElement('div'); d.className = 'msg ' + m.role;
+      d.textContent = (m.role === 'user' ? 'You: ' : m.role === 'director' ? 'Director: ' : '') + m.text;
+      log.append(d);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+  $('#chat').classList.toggle('open', chatOpen && msgs.length > 0);
+  $('#chatToggle').textContent = chatOpen ? '▼' : '▲';
+  const has = !!state.director, busy = state.busy;
+  $('#chatIn').disabled = !has || busy; $('#chatSend').disabled = !has || busy;
+  $('#chatIn').placeholder = !has ? 'Make one agent the Director first (open an agent, then “Make this agent the Director”)' : busy ? 'The Director is thinking…' : 'Tell the Director what you want…';
+  const d = state.agents.find(a => a.id === state.director);
+  $('#chatStatus').textContent = d ? `Director: ${d.name}${busy ? ' · thinking…' : ''}` : '';
+  $('#autoRev').checked = state.autoReview;
 }
-function closePanel() { selected = null; $('#panel').classList.remove('open'); }
+async function sendChat() {
+  const t = $('#chatIn').value.trim();
+  if (!t || !state.director || state.busy) return;
+  try { await api('POST', '/api/chat', { text: t }); $('#chatIn').value = ''; chatOpen = true; } catch (e) { toast(e.message); }
+}
+$('#chatSend').onclick = sendChat;
+$('#chatIn').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+$('#chatToggle').onclick = () => { chatOpen = !chatOpen; renderChat(); };
+$('#autoRev').onchange = e => api('POST', '/api/autoreview', { on: e.target.checked }).catch(err => toast(err.message));
+
+// ---------- side panel: agent ----------
+const cur = () => state.agents.find(a => a.id === selected);
+const curProj = () => state.projects.find(p => p.id === selProj);
+const backendLabel = id => (state.backends.find(b => b.id === id) || {}).label || id;
+let histSig = '', notesSig = '';
+function syncPanel() {
+  const open = !!(selected || selProj);
+  $('#panel').classList.toggle('open', open); document.body.classList.toggle('panel-open', open);
+  $('#agentView').hidden = !selected; $('#projView').hidden = !selProj;
+}
+function openPanel(id) {
+  selected = id; selProj = null; placing = false; histSig = notesSig = '';
+  $('#pTask').value = drafts.get(id) || '';
+  syncPanel(); if (cur()) refreshPanel();
+}
+function closePanel() { selected = null; selProj = null; syncPanel(); }
+async function loadNotes(id) {
+  try { const j = await api('GET', '/api/notes/' + id); if (selected === id) $('#pNotes').textContent = j.text; } catch (e) { /* ignore */ }
+}
 function refreshPanel() {
   const a = cur();
   if (!a) { closePanel(); return; }
+  const proj = state.projects.find(p => p.id === a.project);
   $('#pName').textContent = a.name;
-  $('#pMeta').textContent = a.backend === 'mock' ? 'Mock worker'
-    : a.backend === 'opencode' ? `${a.model} · folder: workspaces/${a.id}`
-    : `${backendLabel(a.backend)} · ${a.model}`;
+  $('#pMeta').textContent = (proj ? proj.name + ' · ' : '') + (a.backend === 'mock' ? 'Mock worker' : `${backendLabel(a.backend)} · ${a.model}`);
   const pill = $('#pStatus'); pill.textContent = a.status; pill.className = 'pill ' + a.status;
+  $('#pDirTag').hidden = !a.isDirector;
   $('#pRole').textContent = a.role || '(none)';
+  $('#taskBox').hidden = a.isDirector; $('#dirNote').hidden = !a.isDirector; $('#pDir').hidden = a.isDirector;
   $('#pRun').disabled = a.status === 'working';
   const out = $('#pOut');
   if (a.status === 'working') { out.textContent = `Working on: ${a.task}\n(${Math.max(0, Math.round(Date.now() / 1000 - a.startedAt))}s)`; out.className = ''; }
   else if (a.status === 'failed') { out.textContent = a.error || 'Failed'; out.className = 'err'; }
   else if (a.status === 'done') { out.textContent = a.output; out.className = ''; }
   else { out.textContent = 'No task run yet.'; out.className = 'mut'; }
+  const nsig = a.id + a.status + (a.finishedAt || '');
+  if (nsig !== notesSig) { notesSig = nsig; loadNotes(a.id); }
   const sig = a.id + a.history.length + (a.history[0] ? a.history[0].finishedAt : '');
   if (sig !== histSig) {
     histSig = sig;
@@ -445,8 +610,7 @@ function refreshPanel() {
   }
 }
 setInterval(() => { const a = cur(); if (a && a.status === 'working') refreshPanel(); }, 1000);
-
-$('#pClose').onclick = closePanel;
+$('#pClose').onclick = closePanel; $('#jClose').onclick = closePanel;
 $('#pTask').addEventListener('input', () => { if (selected) drafts.set(selected, $('#pTask').value); });
 $('#pTask').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runTask(); } });
 $('#pRun').onclick = runTask;
@@ -454,44 +618,105 @@ async function runTask() {
   const a = cur(); if (!a || a.status === 'working') return;
   const task = $('#pTask').value.trim();
   if (!task) { toast('Type a task first.'); return; }
-  try { await api('POST', `/api/agents/${a.id}/task`, { task }); drafts.delete(a.id); $('#pTask').value = ''; }
-  catch (e) { toast(e.message); }
+  try { await api('POST', `/api/agents/${a.id}/task`, { task }); drafts.delete(a.id); $('#pTask').value = ''; } catch (e) { toast(e.message); }
 }
-let delTimer;
-$('#pDel').onclick = async () => {
-  const b = $('#pDel');
-  if (!b.dataset.armed) {
-    b.dataset.armed = '1'; b.textContent = 'Click again to confirm';
-    delTimer = setTimeout(() => { delete b.dataset.armed; b.textContent = 'Delete agent'; }, 3000);
-    return;
+$('#pDir').onclick = async () => { const a = cur(); if (a) try { await api('POST', `/api/agents/${a.id}/director`); } catch (e) { toast(e.message); } };
+function armed(btn, label, action) {
+  let timer;
+  btn.onclick = async () => {
+    if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Click again to confirm'; timer = setTimeout(() => { delete btn.dataset.armed; btn.textContent = label; }, 3000); return; }
+    clearTimeout(timer); delete btn.dataset.armed; btn.textContent = label;
+    try { await action(); } catch (e) { toast(e.message); }
+  };
+}
+armed($('#pDel'), 'Delete agent', async () => { const a = cur(); if (a) { await api('DELETE', `/api/agents/${a.id}`); closePanel(); } });
+
+// ---------- side panel: platform ----------
+function openProj(id) { selProj = id; selected = null; placing = false; syncPanel(); refreshProj(); }
+function refreshProj() {
+  const p = curProj();
+  if (!p) { closePanel(); return; }
+  $('#jName').textContent = p.name; $('#jDesc').textContent = p.description || '(no description)';
+  const box = $('#jList'); box.replaceChildren();
+  const list = agentsOf(p.id);
+  if (!list.length) { const m = document.createElement('p'); m.className = 'mut'; m.textContent = 'No agents here yet.'; box.append(m); }
+  for (const a of list) {
+    const b = document.createElement('button'); b.textContent = `${a.isDirector ? '♛ ' : ''}${a.name} · ${a.status}`;
+    b.onclick = () => openPanel(a.id); box.append(b);
   }
-  clearTimeout(delTimer); delete b.dataset.armed; b.textContent = 'Delete agent';
-  const a = cur(); if (!a) return;
-  try { await api('DELETE', `/api/agents/${a.id}`); closePanel(); } catch (e) { toast(e.message); }
+}
+$('#jAdd').onclick = () => openModal(selProj);
+armed($('#jDel'), 'Delete platform', async () => { const p = curProj(); if (p) { await api('DELETE', `/api/projects/${p.id}`); closePanel(); } });
+
+// ---------- add-platform dialog ----------
+function openPlatModal(q, r) {
+  pendingSlot = [q, r]; $('#nName').value = ''; $('#nDesc').value = ''; $('#nErr').textContent = '';
+  $('#pmodal').hidden = false; $('#nName').focus();
+}
+function closePlatModal() { $('#pmodal').hidden = true; pendingSlot = null; }
+$('#nCancel').onclick = closePlatModal;
+$('#pmodal').addEventListener('mousedown', e => { if (e.target === $('#pmodal')) closePlatModal(); });
+$('#pForm').onsubmit = async e => {
+  e.preventDefault();
+  if (!pendingSlot) return;
+  const btn = $('#nSubmit'); btn.disabled = true; $('#nErr').textContent = '';
+  try {
+    const p = await api('POST', '/api/projects', { name: $('#nName').value, description: $('#nDesc').value, q: pendingSlot[0], r: pendingSlot[1] });
+    if (!state.projects.some(x => x.id === p.id)) state.projects.push(p);
+    closePlatModal(); placing = false; openProj(p.id);
+  } catch (err) { $('#nErr').textContent = err.message; } finally { btn.disabled = false; }
+};
+$('#addPlat').onclick = () => {
+  placing = !placing; closePanel();
+  if (placing) toast('Click a glowing spot next to a platform to place the new one. Esc cancels.');
 };
 
 // ---------- add-agent dialog ----------
+const modelDefaults = { gemini: 'gemini-3.1-flash-lite', opencode: 'opencode/big-pickle', 'opencode-readonly': 'opencode/big-pickle', claude: 'sonnet' };
+const modelExtra = {
+  gemini: 'Free tier: Flash and Flash-Lite models only (Pro needs billing). Flash-Lite has the most free requests.',
+  openrouter: 'Only free models are listed. Free models have daily request limits.',
+  claude: 'Good choice for the Director. Sonnet is a balanced default.',
+};
+let modelReq = 0;
+const getModel = () => $('#mModelSel').hidden ? $('#mModel').value.trim() : $('#mModelSel').value;
+async function loadModels(id) {
+  const req = ++modelReq, sel = $('#mModelSel'), txt = $('#mModel');
+  sel.hidden = true; txt.hidden = false; txt.required = id !== 'mock'; sel.required = false;
+  if (id === 'mock') return;
+  let list = [];
+  try { list = (await api('GET', '/api/models/' + id)).models || []; } catch (e) { list = []; }
+  if (req !== modelReq || $('#mBackend').value !== id) return;
+  if (!list.length) { txt.placeholder = 'Could not load the list. Type a model id.'; return; }
+  sel.replaceChildren();
+  for (const m of list) { const o = document.createElement('option'); o.value = o.textContent = m; sel.append(o); }
+  if (list.includes(modelDefaults[id])) sel.value = modelDefaults[id];
+  sel.hidden = false; sel.required = true; txt.hidden = true; txt.required = false;
+}
 function updateModalHint() {
-  const b = state.backends.find(x => x.id === $('#mBackend').value);
+  const id = $('#mBackend').value, b = state.backends.find(x => x.id === id);
   const isMock = !b || b.id === 'mock';
   $('#mModelWrap').hidden = isMock;
-  $('#mModel').required = !isMock;
-  const oc = !!b && b.id.startsWith('opencode');
-  $('#mModel').placeholder = oc ? 'opencode/big-pickle' : b && b.id === 'openrouter' ? 'model id, e.g. a name from openrouter.ai/models ending in :free' : 'model id from Google AI Studio';
-  if (oc && !$('#mModel').value) $('#mModel').value = 'opencode/big-pickle';
-  else if (!oc && $('#mModel').value.startsWith('opencode/')) $('#mModel').value = '';
-  $('#mHint').textContent = isMock ? 'Simulates work with no API call. Use it to try the system.'
+  loadModels(isMock ? 'mock' : id);
+  const base = isMock ? 'Simulates work with no API call. Use it to try the system.'
     : !b.ready ? (b.needsKey ? `Missing ${b.needsKey}: add it to the .env file next to server.py and restart the server, or the agent will fail.` : b.missing)
     : (b.note || 'API key found.');
+  $('#mHint').textContent = [base, modelExtra[id]].filter(Boolean).join(' ');
 }
-function openModal() {
+function openModal(projectId) {
+  if (!state.projects.length) { toast('Add a platform first (button at the bottom left).'); return; }
   const sel = $('#mBackend'); sel.replaceChildren();
-  for (const b of state.backends) { const o = document.createElement('option'); o.value = b.id; o.textContent = b.label + (b.ready ? '' : ' (no key yet)'); sel.append(o); }
-  $('#mName').value = ''; $('#mRole').value = ''; $('#mModel').value = ''; $('#mErr').textContent = '';
+  for (const b of state.backends) { const o = document.createElement('option'); o.value = b.id; o.textContent = b.label + (b.ready ? '' : ' (not ready)'); sel.append(o); }
+  const ps = $('#mProject'); ps.replaceChildren();
+  for (const p of state.projects) { const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; ps.append(o); }
+  const def = projectId || selProj || (cur() && cur().project) || state.projects[0].id;
+  ps.value = def;
+  $('#mName').value = ''; $('#mRole').value = ''; $('#mModel').value = ''; $('#mErr').textContent = ''; $('#mModel').placeholder = 'Loading models…';
+  $('#mDir').checked = !state.director;
   updateModalHint(); $('#modal').hidden = false; $('#mName').focus();
 }
 function closeModal() { $('#modal').hidden = true; }
-$('#addBtn').onclick = openModal;
+$('#addAgent').onclick = () => openModal();
 $('#mCancel').onclick = closeModal;
 $('#mBackend').onchange = updateModalHint;
 $('#modal').addEventListener('mousedown', e => { if (e.target === $('#modal')) closeModal(); });
@@ -499,16 +724,17 @@ $('#mForm').onsubmit = async e => {
   e.preventDefault();
   const btn = $('#mSubmit'); btn.disabled = true; $('#mErr').textContent = '';
   try {
-    const a = await api('POST', '/api/agents', { name: $('#mName').value, role: $('#mRole').value, backend: $('#mBackend').value, model: $('#mModel').value });
+    const a = await api('POST', '/api/agents', { name: $('#mName').value, role: $('#mRole').value, backend: $('#mBackend').value, model: getModel(), project: $('#mProject').value, isDirector: $('#mDir').checked });
     if (!state.agents.some(x => x.id === a.id)) state.agents.push(a);
     closeModal(); openPanel(a.id);
-  } catch (err) { $('#mErr').textContent = err.message; }
-  finally { btn.disabled = false; }
+  } catch (err) { $('#mErr').textContent = err.message; } finally { btn.disabled = false; }
 };
 addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
-  if (!$('#modal').hidden) closeModal(); else closePanel();
+  if (!$('#modal').hidden) closeModal(); else if (!$('#pmodal').hidden) closePlatModal();
+  else if (placing) placing = false; else closePanel();
 });
+renderChat();
 </script>
 </body>
 </html>

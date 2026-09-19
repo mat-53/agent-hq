@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Agent HQ: a tiny local server that manages agents and streams their status to the browser."""
+﻿#!/usr/bin/env python3
+"""Agent HQ: local server for a small company of AI agents grouped into project platforms."""
 import json
 import os
 import queue
@@ -7,6 +7,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -17,16 +18,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DATA_FILE = ROOT / "data" / "agents.json"
+DATA_DIR = Path(os.environ.get("AGENT_HQ_DATA_DIR") or ROOT / "data")
+STATE_FILE = DATA_DIR / "state.json"
+LEGACY_FILE = DATA_DIR / "agents.json"
+NOTES_DIR = DATA_DIR / "notes"
 WORKSPACES = ROOT / "workspaces"
-OPENCODE_TIMEOUT = 900
-SECRET_ENV = ("OPENROUTER_API_KEY", "GEMINI_API_KEY")
-HOST, PORT = "127.0.0.1", 8765
+HOST, PORT = "127.0.0.1", int(os.environ.get("AGENT_HQ_PORT") or 8765)
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
-MAX_BODY, MAX_OUTPUT, MAX_HISTORY, MAX_AGENTS = 100_000, 20_000, 10, 40
+MAX_BODY, MAX_OUTPUT, MAX_HISTORY = 100_000, 20_000, 10
+MAX_AGENTS, MAX_PROJECTS, MAX_CHAT, MAX_AUTO_ROUNDS = 40, 12, 200, 4
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\-]{1,100}$")
-PROVIDER_TIMEOUT = 120
+PROVIDER_TIMEOUT, OPENCODE_TIMEOUT, CLAUDE_TIMEOUT = 120, 900, 300
+SECRET_ENV = ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+CLAUDE_MODELS = ("opus", "sonnet", "haiku")
+NEIGHBORS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
+SUMMARY_RULE = ("\n\nWhen you are finished, end your reply with a line 'SUMMARY:' followed by at most 6 short "
+                "lines that your teammates can read. Put nothing after the summary.")
+DIRECTOR_MARK = "You are the Director of a small company of AI agents."
+DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents and pass information between them.
+To act, end your reply with ONE json block, exactly like this:
+```json
+{"actions":[{"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]}]}
+```
+Rules:
+- Only assign to agents whose status is idle, done or failed. Never assign to an agent that is working.
+- "include_notes_from" is optional. It gives the agent the latest summary of teammates whose findings help with the task.
+- Give each task clear success criteria. Agents end their work with a short SUMMARY.
+- If nothing needs to be delegated, write only a short plain reply without a json block.
+- Keep replies short. Answer in the owner's language."""
 
 
 def load_env():
@@ -48,64 +68,109 @@ class ApiError(Exception):
 
 
 lock = threading.RLock()
-agents = {}
-clients = []
+projects, agents, clients = {}, {}, []
+chat = []
+settings = {"autoReview": True}
+director_busy = False
+review_pending = False
+auto_rounds = 0
 
 
-def find_opencode():
-    candidates = [os.environ.get("OPENCODE_EXE", "")]
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        candidates.append(str(Path(appdata) / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"))
-    candidates.append(str(Path.home() / ".opencode" / "bin" / "opencode.exe"))
-    for c in candidates:
+# ---------- tool discovery ----------
+
+def find_exe(env_name, candidates):
+    for c in [os.environ.get(env_name, "")] + candidates:
         if c and c.lower().endswith(".exe") and Path(c).is_file():
             return c
     return None
 
 
+def find_opencode():
+    appdata = os.environ.get("APPDATA")
+    cands = [str(Path(appdata) / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe")] if appdata else []
+    return find_exe("OPENCODE_EXE", cands + [str(Path.home() / ".opencode" / "bin" / "opencode.exe")])
+
+
+def find_claude():
+    return find_exe("CLAUDE_EXE", [str(Path.home() / ".local" / "bin" / "claude.exe")])
+
+
 def backend_info():
-    oc = find_opencode() is not None
-    missing = "OpenCode was not found. Install it, or set OPENCODE_EXE in .env to the full path of opencode.exe."
+    oc, cl = find_opencode() is not None, find_claude() is not None
+    oc_missing = "OpenCode was not found. Install it, or set OPENCODE_EXE in .env to the full path of opencode.exe."
     return [
         {"id": "mock", "label": "Mock (no API, for testing)", "ready": True, "needsKey": None},
+        {"id": "claude", "label": "Claude (your subscription, via claude CLI)", "ready": cl, "needsKey": None,
+         "missing": "The claude CLI was not found. Install Claude Code, or set CLAUDE_EXE in .env.",
+         "note": "Uses your Claude subscription limits (the same pool as Claude Code). Opus is smartest but drains the limit fastest. Text only."},
         {"id": "opencode", "label": "OpenCode: builder (edits files, runs commands)", "ready": oc, "needsKey": None,
-         "missing": missing, "note": "Works in its own folder under workspaces/, but it is NOT sandboxed: the model can run shell commands as you. Free models only."},
-        {"id": "opencode-readonly", "label": "OpenCode: read-only (plans, reviews)", "ready": oc, "needsKey": None,
-         "missing": missing, "note": "Read-only planning agent. It cannot edit files or run commands."},
-        {"id": "openrouter", "label": "OpenRouter", "ready": bool(os.environ.get("OPENROUTER_API_KEY")),
+         "missing": oc_missing, "note": "Works in its own folder under workspaces/, but it is NOT sandboxed: the model can run shell commands as you. Free models only."},
+        {"id": "opencode-readonly", "label": "OpenCode: read-only (plans, reviews, browses)", "ready": oc, "needsKey": None,
+         "missing": oc_missing, "note": "Read-only agent. It can browse web pages but cannot edit files or run commands."},
+        {"id": "openrouter", "label": "OpenRouter (text only)", "ready": bool(os.environ.get("OPENROUTER_API_KEY")),
          "needsKey": "OPENROUTER_API_KEY"},
-        {"id": "gemini", "label": "Google Gemini (AI Studio)", "ready": bool(os.environ.get("GEMINI_API_KEY")),
+        {"id": "gemini", "label": "Google Gemini (text only)", "ready": bool(os.environ.get("GEMINI_API_KEY")),
          "needsKey": "GEMINI_API_KEY"},
     ]
 
 
+# ---------- state ----------
+
+def current_director():
+    return next((a for a in agents.values() if a.get("isDirector")), None)
+
+
 def snapshot():
     with lock:
-        ordered = sorted(agents.values(), key=lambda a: a["slot"])
-        return {"agents": ordered, "backends": backend_info()}
+        return {"projects": sorted(projects.values(), key=lambda p: p["created"]),
+                "agents": sorted(agents.values(), key=lambda a: a["created"]),
+                "backends": backend_info(), "chat": chat[-80:], "busy": director_busy,
+                "autoReview": settings["autoReview"], "director": (current_director() or {}).get("id")}
 
 
 def save():
-    DATA_FILE.parent.mkdir(exist_ok=True)
-    tmp = DATA_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(list(agents.values()), indent=2), encoding="utf-8")
-    os.replace(tmp, DATA_FILE)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"projects": list(projects.values()), "agents": list(agents.values()),
+                               "chat": chat, "settings": settings}, indent=2), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
+
+
+def slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:30] or "agent"
 
 
 def load():
-    if not DATA_FILE.exists():
-        return
+    stored = {}
     try:
-        stored = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        if STATE_FILE.exists():
+            stored = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        elif LEGACY_FILE.exists():
+            stored = {"agents": json.loads(LEGACY_FILE.read_text(encoding="utf-8"))}
     except (OSError, json.JSONDecodeError):
-        print("Warning: could not read data/agents.json, starting empty", file=sys.stderr)
+        print("Warning: could not read saved state, starting empty", file=sys.stderr)
         return
-    for a in stored:
+    now = time.time()
+    for i, p in enumerate(stored.get("projects", [])):
+        p.setdefault("created", now + i)
+        projects[p["id"]] = p
+    legacy = [a for a in stored.get("agents", []) if a.get("project") not in projects]
+    if legacy and not projects:
+        pid = uuid.uuid4().hex[:8]
+        projects[pid] = {"id": pid, "name": "Main", "description": "", "q": 0, "r": 0, "created": now}
+    for i, a in enumerate(stored.get("agents", [])):
+        a.setdefault("created", now + i)
+        a.setdefault("isDirector", False)
+        a.setdefault("summary", "")
+        a.setdefault("by", "user")
+        a.setdefault("notesFile", f"{slug(a.get('name', ''))}-{a['id']}.md")
+        if a.get("project") not in projects:
+            a["project"] = next(iter(projects))
         if a.get("status") == "working":
-            a.update(status="failed", error="The server restarted while this task was running.",
-                     finishedAt=time.time())
+            a.update(status="failed", error="The server restarted while this task was running.", finishedAt=now)
         agents[a["id"]] = a
+    chat.extend(stored.get("chat", [])[-MAX_CHAT:])
+    settings.update(stored.get("settings", {}))
 
 
 def broadcast():
@@ -117,18 +182,41 @@ def broadcast():
             pass
 
 
+def add_chat(role, text):
+    chat.append({"role": role, "text": text[:4000], "ts": time.time()})
+    del chat[:-MAX_CHAT]
+
+
+def write_notes(a):
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    proj = projects.get(a["project"], {}).get("name", "?")
+    parts = [f"# {a['name']}", f"Project: {proj}", f"Role: {a['role'] or '-'}",
+             f"Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}", "", "## Latest summary", a["summary"] or "(no work yet)",
+             "", "## Earlier work"]
+    for h in a["history"][1:]:
+        if h["status"] == "done":
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["finishedAt"]))
+            parts += [f"### {when} - {h['task'][:80]}", h.get("summary", "")[:800], ""]
+    (NOTES_DIR / a["notesFile"]).write_text("\n".join(parts), encoding="utf-8")
+
+
+def extract_summary(text):
+    idx = text.upper().rfind("SUMMARY:")
+    body = text[idx + 8:] if idx != -1 else text
+    return body.strip()[:1200] if idx != -1 else body.strip()[:500]
+
+
 # ---------- worker backends ----------
 
-def http_json(url, headers, body):
+def http_json(url, headers, body=None):
     req = urllib.request.Request(
-        url, data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json", **headers})
+        url, data=None if body is None else json.dumps(body).encode("utf-8"),
+        method="GET" if body is None else "POST", headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(req, timeout=PROVIDER_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"HTTP {e.code} from provider: {detail}") from None
+        raise RuntimeError(f"HTTP {e.code} from provider: {e.read().decode('utf-8', 'replace')[:500]}") from None
     except urllib.error.URLError as e:
         raise RuntimeError(f"Network error: {e.reason}") from None
     except (TimeoutError, json.JSONDecodeError) as e:
@@ -142,42 +230,73 @@ def require_key(name):
     return key
 
 
+def clean_env():
+    return {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
+
+
 def run_mock(agent, task):
-    time.sleep(random.uniform(3, 6))
-    if "fail" in task.lower():
+    time.sleep(random.uniform(2, 4))
+    if DIRECTOR_MARK in task:
+        lines = [ln for ln in task.split("CONVERSATION (oldest first):", 1)[-1].strip().splitlines() if ln.strip()]
+        if len(lines) >= 2 and lines[-2].startswith("System:"):
+            return "Reviewed the results. Nothing more to do right now."
+        m = re.search(r"^- (.+?) \| project", task, re.M)
+        if not m:
+            return "You have no agents yet. Add one first."
+        act = {"actions": [{"type": "assign", "agent": m.group(1), "task": "Introduce yourself in one sentence."}]}
+        return f"I'll ask {m.group(1)} to get started.\n```json\n{json.dumps(act)}\n```"
+    if "fail" in task.split("\n\nInformation from teammates")[0].lower():
         raise RuntimeError("Mock failure (your task contained the word 'fail').")
-    return f"[mock worker for {agent['name']}]\nPretended to work on:\n{task}"
+    return f"[mock worker for {agent['name']}] Pretended to work.\nSUMMARY:\nDid the task (mock)."
 
 
 def run_openrouter(agent, task):
     key = require_key("OPENROUTER_API_KEY")
-    data = http_json(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {"Authorization": f"Bearer {key}"},
-        {"model": agent["model"], "messages": [
-            {"role": "system", "content": agent["role"] or "You are a helpful agent."},
-            {"role": "user", "content": task}]})
+    data = http_json("https://openrouter.ai/api/v1/chat/completions", {"Authorization": f"Bearer {key}"},
+                     {"model": agent["model"], "messages": [
+                         {"role": "system", "content": agent["role"] or "You are a helpful agent."},
+                         {"role": "user", "content": task}]})
     try:
-        text = data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(f"Unexpected response from OpenRouter: {json.dumps(data)[:300]}") from None
-    return text
 
 
 def run_gemini(agent, task):
     key = require_key("GEMINI_API_KEY")
     model = agent["model"].removeprefix("models/")
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{urllib.parse.quote(model, safe='')}:generateContent")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='')}:generateContent"
     body = {"contents": [{"role": "user", "parts": [{"text": task}]}]}
     if agent["role"]:
         body["systemInstruction"] = {"parts": [{"text": agent["role"]}]}
     data = http_json(url, {"x-goog-api-key": key}, body)
     try:
-        text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(f"Unexpected response from Gemini: {json.dumps(data)[:300]}") from None
-    return text
+
+
+def run_claude(agent, task):
+    exe = find_claude()
+    if not exe:
+        raise RuntimeError("The claude CLI was not found. Install Claude Code, or set CLAUDE_EXE in .env.")
+    cwd = Path(tempfile.gettempdir()) / "agent-hq-claude"
+    cwd.mkdir(exist_ok=True)
+    system = "You are one AI agent in a small company. Follow the instructions directly and concisely."
+    if agent["role"]:
+        system += " Your role: " + agent["role"]
+    cmd = [exe, "-p", "--model", agent["model"], "--tools", "x", "--strict-mcp-config", "--no-session-persistence",
+           "--setting-sources", "project", "--disable-slash-commands", "--system-prompt", system]
+    try:
+        proc = subprocess.run(cmd, input=task, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=CLAUDE_TIMEOUT, cwd=str(cwd), env=clean_env(),
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"The claude CLI took longer than {CLAUDE_TIMEOUT // 60} minutes and was stopped.") from None
+    out = proc.stdout.strip()
+    if proc.returncode != 0 or not out:
+        raise RuntimeError("Claude CLI failed: " + ((out or proc.stderr).strip()[-400:] or f"exit code {proc.returncode}"))
+    return out
 
 
 def run_opencode(agent, task, readonly=False):
@@ -193,10 +312,9 @@ def run_opencode(agent, task, readonly=False):
     if readonly:
         cmd += ["--agent", "plan"]
     cmd.append(prompt)
-    env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=OPENCODE_TIMEOUT, stdin=subprocess.DEVNULL, env=env,
+                              timeout=OPENCODE_TIMEOUT, stdin=subprocess.DEVNULL, env=clean_env(),
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"OpenCode took longer than {OPENCODE_TIMEOUT // 60} minutes and was stopped.") from None
@@ -235,39 +353,280 @@ def run_opencode(agent, task, readonly=False):
     return out
 
 
-RUNNERS = {"mock": run_mock, "openrouter": run_openrouter, "gemini": run_gemini,
+# ---------- model lists ----------
+
+MODEL_CACHE = {}
+
+
+def models_gemini():
+    key = require_key("GEMINI_API_KEY")
+    data = http_json("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": key})
+    skip = ("image", "tts", "transcribe", "customtools", "embedding")
+    names = [m["name"].removeprefix("models/") for m in data.get("models", [])
+             if "generateContent" in m.get("supportedGenerationMethods", [])]
+    names = [n for n in names if n.startswith("gemini") and not any(s in n for s in skip)]
+    return sorted(names, key=lambda n: (0 if "flash-lite" in n else 1 if "flash" in n else 2, n))
+
+
+def models_openrouter():
+    out = []
+    for m in http_json("https://openrouter.ai/api/v1/models", {}).get("data", []):
+        price = m.get("pricing") or {}
+        if m.get("id", "").endswith(":free") or (price.get("prompt") == "0" and price.get("completion") == "0"):
+            out.append(m["id"])
+    return sorted(set(out))
+
+
+def models_opencode():
+    exe = find_opencode()
+    if not exe:
+        raise RuntimeError("OpenCode was not found.")
+    proc = subprocess.run([exe, "models"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=30, stdin=subprocess.DEVNULL, env=clean_env(),
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    ids = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip().startswith("opencode/")]
+    return sorted(i for i in ids if "free" in i or i == "opencode/big-pickle")
+
+
+def list_models(backend):
+    if backend == "claude":
+        return list(CLAUDE_MODELS)
+    hit = MODEL_CACHE.get(backend)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    fn = {"gemini": models_gemini, "openrouter": models_openrouter,
+          "opencode": models_opencode, "opencode-readonly": models_opencode}[backend]
+    models = fn()
+    if models:
+        MODEL_CACHE[backend] = (time.time(), models)
+    return models
+
+
+RUNNERS = {"mock": run_mock, "openrouter": run_openrouter, "gemini": run_gemini, "claude": run_claude,
            "opencode": run_opencode, "opencode-readonly": lambda a, t: run_opencode(a, t, readonly=True)}
 
 
-def worker(agent_id, snap, task):
+# ---------- tasks ----------
+
+def find_agent(name):
+    name = str(name).strip().lower()
+    return next((a for a in agents.values() if a["name"].lower() == name), None)
+
+
+def context_from(names, exclude):
+    parts = []
+    for n in names[:5] if isinstance(names, list) else []:
+        src = find_agent(n)
+        if src and src["id"] != exclude and src["summary"]:
+            parts.append(f"### {src['name']}\n{src['summary'][:3000]}")
+    return "\n\n".join(parts)
+
+
+def begin_task(a, task, by="user", names=()):
+    """Caller must hold the lock."""
+    if a["status"] == "working":
+        raise ApiError(409, "This agent is already working")
+    prompt = task
+    ctx = context_from(list(names), a["id"])
+    if ctx:
+        prompt += "\n\nInformation from teammates (use it if it helps):\n" + ctx
+    prompt += SUMMARY_RULE
+    a.update(status="working", task=task, output="", error="", startedAt=time.time(), finishedAt=None, by=by)
+    snap = dict(a)
+    save()
+    broadcast()
+    threading.Thread(target=worker, args=(a["id"], snap, task, prompt), daemon=True).start()
+
+
+def worker(agent_id, snap, task, prompt):
+    global review_pending
     try:
-        output = RUNNERS[snap["backend"]](snap, task)
+        output = RUNNERS[snap["backend"]](snap, prompt)
         if not output.strip():
             raise RuntimeError("The model returned an empty response.")
         status, error = "done", ""
-    except Exception as e:  # any failure becomes a visible "failed" state
+    except Exception as e:
         output, status, error = "", "failed", str(e)
+    directed = False
     with lock:
         a = agents.get(agent_id)
         if not a:
             return
         finished = time.time()
+        summary = extract_summary(output) if status == "done" else ""
         a.update(status=status, output=output[:MAX_OUTPUT], error=error[:2000], finishedAt=finished)
-        a["history"].insert(0, {"task": task, "status": status, "output": a["output"],
-                                "error": a["error"], "finishedAt": finished})
+        if status == "done":
+            a["summary"] = summary
+        a["history"].insert(0, {"task": task, "status": status, "output": a["output"][:4000], "error": a["error"],
+                                "summary": summary, "finishedAt": finished})
         del a["history"][MAX_HISTORY:]
+        try:
+            write_notes(a)
+        except OSError as e:
+            print(f"Could not write notes: {e}", file=sys.stderr)
+        directed = a.get("by") == "director" and not a.get("isDirector")
+        if directed:
+            add_chat("system", f"{a['name']} {'finished' if status == 'done' else 'failed'}: "
+                               f"{(summary or a['error'])[:300] or '(no summary)'}")
+            review_pending = settings["autoReview"]
         save()
         broadcast()
+    if directed:
+        try_review()
 
 
-# ---------- agent operations ----------
+# ---------- director ----------
+
+def build_director_prompt(d):
+    roster = []
+    for a in sorted(agents.values(), key=lambda x: x["created"]):
+        if a.get("isDirector"):
+            continue
+        pname = projects.get(a["project"], {}).get("name", "?")
+        roster.append(f"- {a['name']} | project: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
+                      f"\n  latest summary: {(a['summary'] or '(no work yet)')[:600]}".replace("\r", ""))
+    label = {"user": "Owner", "director": "Director", "system": "System"}
+    convo = "\n".join(f"{label.get(m['role'], 'System')}: {re.sub(r'\s+', ' ', m['text'])[:700]}" for m in chat[-14:])
+    extra = f"\n\nExtra instructions from the owner: {d['role']}" if d["role"] else ""
+    return (f"{DIRECTOR_RULES}{extra}\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
+            "\n\nCONVERSATION (oldest first):\n" + convo + "\n\nWrite the Director's next message.")
+
+
+def parse_actions(text):
+    match = None
+    for match in re.finditer(r"```json\s*(\{.*?\})\s*```", text, re.S):
+        pass
+    if not match:
+        return text.strip(), [], False
+    cleaned = (text[:match.start()] + text[match.end():]).strip()
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return cleaned, [], True
+    acts = data.get("actions") if isinstance(data, dict) else None
+    return cleaned, (acts if isinstance(acts, list) else []), not isinstance(acts, list)
+
+
+def director_turn():
+    global director_busy
+    with lock:
+        d = current_director()
+        if not d or director_busy:
+            return False
+        director_busy = True
+        d.update(status="working", task="Thinking...", output="", error="", startedAt=time.time(), finishedAt=None)
+        snap, prompt = dict(d), build_director_prompt(d)
+        broadcast()
+    threading.Thread(target=director_run, args=(snap, prompt), daemon=True).start()
+    return True
+
+
+def director_run(snap, prompt):
+    global director_busy
+    try:
+        reply = RUNNERS[snap["backend"]](snap, prompt)
+        error = "" if reply.strip() else "The Director returned an empty reply."
+    except Exception as e:
+        reply, error = "", str(e)
+    with lock:
+        d = agents.get(snap["id"])
+        if error:
+            add_chat("system", f"The Director could not answer: {error[:400]}")
+        else:
+            text, actions, bad = parse_actions(reply)
+            if text:
+                add_chat("director", text)
+            for act in actions[:8]:
+                add_chat("system", run_action(act))
+            if bad:
+                add_chat("system", "The Director's action block was invalid, so nothing was assigned.")
+        if d:
+            d.update(status="failed" if error else "done", error=error[:2000], output=reply[:MAX_OUTPUT],
+                     finishedAt=time.time())
+        director_busy = False
+        save()
+        broadcast()
+    try_review()
+
+
+def run_action(act):
+    if not isinstance(act, dict) or act.get("type") != "assign":
+        return "Skipped an unknown action."
+    target, task = find_agent(act.get("agent", "")), act.get("task")
+    if not target or target.get("isDirector"):
+        return f"Skipped: no agent named '{str(act.get('agent'))[:40]}'."
+    if not isinstance(task, str) or not task.strip():
+        return f"Skipped: empty task for {target['name']}."
+    try:
+        begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+    except ApiError as e:
+        return f"Could not assign to {target['name']}: {e.message}."
+    return f"Assigned to {target['name']}: {task.strip()[:160]}"
+
+
+def try_review():
+    global review_pending, auto_rounds
+    with lock:
+        if not review_pending or director_busy or not settings["autoReview"] or not current_director():
+            return
+        if any(a["status"] == "working" and a.get("by") == "director" for a in agents.values()):
+            return
+        review_pending = False
+        if auto_rounds >= MAX_AUTO_ROUNDS:
+            add_chat("system", f"Auto-follow-up stopped after {MAX_AUTO_ROUNDS} rounds. Send a message to continue.")
+            save()
+            broadcast()
+            return
+        auto_rounds += 1
+    director_turn()
+
+
+# ---------- operations ----------
+
+def create_project(d):
+    if not isinstance(d, dict):
+        raise ApiError(400, "Invalid request")
+    name, desc = str(d.get("name", "")).strip(), str(d.get("description", "")).strip()
+    if not 1 <= len(name) <= 40:
+        raise ApiError(400, "Name must be 1-40 characters")
+    if len(desc) > 500:
+        raise ApiError(400, "Description is too long (max 500 characters)")
+    q, r = d.get("q"), d.get("r")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and -8 <= v <= 8 for v in (q, r)):
+        raise ApiError(400, "Invalid platform position")
+    with lock:
+        if len(projects) >= MAX_PROJECTS:
+            raise ApiError(400, f"Platform limit ({MAX_PROJECTS}) reached")
+        taken = {(p["q"], p["r"]) for p in projects.values()}
+        if (q, r) in taken:
+            raise ApiError(400, "That spot is already taken")
+        if taken and not any((q + dq, r + dr) in taken for dq, dr in NEIGHBORS):
+            raise ApiError(400, "Place the platform next to an existing one")
+        if not taken and (q, r) != (0, 0):
+            raise ApiError(400, "The first platform goes in the middle")
+        p = {"id": uuid.uuid4().hex[:8], "name": name, "description": desc, "q": q, "r": r, "created": time.time()}
+        projects[p["id"]] = p
+        save()
+        broadcast()
+        return dict(p)
+
+
+def delete_project(pid):
+    with lock:
+        if pid not in projects:
+            raise ApiError(404, "Platform not found")
+        if any(a["project"] == pid for a in agents.values()):
+            raise ApiError(409, "Delete or move this platform's agents first")
+        del projects[pid]
+        save()
+        broadcast()
+    return {"ok": True}
+
 
 def create_agent(d):
     if not isinstance(d, dict):
         raise ApiError(400, "Invalid request")
-    name = str(d.get("name", "")).strip()
-    role = str(d.get("role", "")).strip()
-    backend = d.get("backend")
+    name, role, backend = str(d.get("name", "")).strip(), str(d.get("role", "")).strip(), d.get("backend")
     model = str(d.get("model", "")).strip()
     if not 1 <= len(name) <= 40:
         raise ApiError(400, "Name must be 1-40 characters")
@@ -277,19 +636,30 @@ def create_agent(d):
         raise ApiError(400, "Unknown worker type")
     if backend == "mock":
         model = "mock"
+    elif backend == "claude":
+        if model not in CLAUDE_MODELS:
+            raise ApiError(400, "Claude model must be opus, sonnet or haiku")
     elif not MODEL_RE.match(model) or model.startswith("-"):
         raise ApiError(400, "Enter a model id (letters, digits and . _ : / - only)")
     elif backend.startswith("opencode") and not model.startswith("opencode/"):
         raise ApiError(400, "OpenCode models must start with 'opencode/' (the free models), e.g. opencode/big-pickle")
     with lock:
+        if d.get("project") not in projects:
+            raise ApiError(400, "Choose a platform for this agent")
         if len(agents) >= MAX_AGENTS:
             raise ApiError(400, f"Agent limit ({MAX_AGENTS}) reached")
-        used = {a["slot"] for a in agents.values()}
-        slot = next(i for i in range(len(used) + 1) if i not in used)
-        agent = {"id": uuid.uuid4().hex[:8], "name": name, "role": role, "backend": backend, "model": model,
-                 "slot": slot, "status": "idle", "task": "", "output": "", "error": "",
-                 "startedAt": None, "finishedAt": None, "history": []}
-        agents[agent["id"]] = agent
+        if find_agent(name):
+            raise ApiError(400, "An agent with that name already exists")
+        aid = uuid.uuid4().hex[:8]
+        agent = {"id": aid, "name": name, "role": role, "backend": backend, "model": model, "project": d["project"],
+                 "isDirector": False, "created": time.time(), "status": "idle", "task": "", "output": "",
+                 "error": "", "summary": "", "by": "user", "startedAt": None, "finishedAt": None, "history": [],
+                 "notesFile": f"{slug(name)}-{aid}.md"}
+        agents[aid] = agent
+        if d.get("isDirector") is True:
+            for other in agents.values():
+                other["isDirector"] = other["id"] == aid
+        write_notes(agent)
         save()
         broadcast()
         return dict(agent)
@@ -305,13 +675,20 @@ def start_task(agent_id, d):
         a = agents.get(agent_id)
         if not a:
             raise ApiError(404, "Agent not found")
-        if a["status"] == "working":
-            raise ApiError(409, "This agent is already working")
-        a.update(status="working", task=task, output="", error="", startedAt=time.time(), finishedAt=None)
-        snap = dict(a)
+        if a.get("isDirector"):
+            raise ApiError(400, "Talk to the Director in the chat bar instead")
+        begin_task(a, task, by="user")
+    return {"ok": True}
+
+
+def set_director(agent_id):
+    with lock:
+        if agent_id not in agents:
+            raise ApiError(404, "Agent not found")
+        for a in agents.values():
+            a["isDirector"] = a["id"] == agent_id
         save()
         broadcast()
-    threading.Thread(target=worker, args=(agent_id, snap, task), daemon=True).start()
     return {"ok": True}
 
 
@@ -324,10 +701,45 @@ def delete_agent(agent_id):
     return {"ok": True}
 
 
+def send_chat(d):
+    global auto_rounds, review_pending
+    text = str(d.get("text", "")).strip() if isinstance(d, dict) else ""
+    if not text:
+        raise ApiError(400, "Message is empty")
+    if len(text) > 4000:
+        raise ApiError(400, "Message is too long (max 4000 characters)")
+    with lock:
+        if not current_director():
+            raise ApiError(400, "Make one agent the Director first")
+        if director_busy:
+            raise ApiError(409, "The Director is still busy")
+        add_chat("user", text)
+        auto_rounds, review_pending = 0, False
+        director_turn()
+    return {"ok": True}
+
+
+def read_notes(agent_id):
+    with lock:
+        a = agents.get(agent_id)
+        if not a:
+            raise ApiError(404, "Agent not found")
+        path = NOTES_DIR / a["notesFile"]
+    try:
+        return {"text": path.read_text(encoding="utf-8")[:20_000]}
+    except OSError:
+        return {"text": "(no notes yet)"}
+
+
 # ---------- HTTP ----------
 
-TASK_ROUTE = re.compile(r"^/api/agents/([0-9a-f]{8})/task$")
-AGENT_ROUTE = re.compile(r"^/api/agents/([0-9a-f]{8})$")
+ID = "([0-9a-f]{8})"
+TASK_ROUTE = re.compile(rf"^/api/agents/{ID}/task$")
+DIRECTOR_ROUTE = re.compile(rf"^/api/agents/{ID}/director$")
+AGENT_ROUTE = re.compile(rf"^/api/agents/{ID}$")
+PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
+NOTES_ROUTE = re.compile(rf"^/api/notes/{ID}$")
+MODELS_ROUTE = re.compile(r"^/api/models/(gemini|openrouter|opencode|opencode-readonly|claude)$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -357,8 +769,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(403, "Bad origin")
 
     def _read_json(self):
-        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        if ctype != "application/json":
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
             raise ApiError(415, "Content-Type must be application/json")
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
@@ -397,25 +808,46 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, snapshot())
         elif path == "/api/events":
             self._events()
+        elif NOTES_ROUTE.match(path):
+            self._json(200, read_notes(NOTES_ROUTE.match(path).group(1)))
+        elif MODELS_ROUTE.match(path):
+            try:
+                self._json(200, {"models": list_models(MODELS_ROUTE.match(path).group(1))})
+            except Exception as e:
+                self._json(200, {"models": [], "error": str(e)[:300]})
         else:
             raise ApiError(404, "Not found")
 
     def _post(self):
         path = urllib.parse.urlparse(self.path).path
-        if path == "/api/agents":
+        if path == "/api/projects":
+            self._json(201, create_project(self._read_json()))
+        elif path == "/api/agents":
             self._json(201, create_agent(self._read_json()))
-            return
-        m = TASK_ROUTE.match(path)
-        if m:
-            self._json(202, start_task(m.group(1), self._read_json()))
-            return
-        raise ApiError(404, "Not found")
+        elif path == "/api/chat":
+            self._json(202, send_chat(self._read_json()))
+        elif path == "/api/autoreview":
+            data = self._read_json()
+            with lock:
+                settings["autoReview"] = bool(data.get("on")) if isinstance(data, dict) else True
+                save()
+                broadcast()
+            self._json(200, {"ok": True})
+        elif TASK_ROUTE.match(path):
+            self._json(202, start_task(TASK_ROUTE.match(path).group(1), self._read_json()))
+        elif DIRECTOR_ROUTE.match(path):
+            self._json(200, set_director(DIRECTOR_ROUTE.match(path).group(1)))
+        else:
+            raise ApiError(404, "Not found")
 
     def _delete(self):
-        m = AGENT_ROUTE.match(urllib.parse.urlparse(self.path).path)
-        if not m:
+        path = urllib.parse.urlparse(self.path).path
+        if AGENT_ROUTE.match(path):
+            self._json(200, delete_agent(AGENT_ROUTE.match(path).group(1)))
+        elif PROJECT_ROUTE.match(path):
+            self._json(200, delete_project(PROJECT_ROUTE.match(path).group(1)))
+        else:
             raise ApiError(404, "Not found")
-        self._json(200, delete_agent(m.group(1)))
 
     def _events(self):
         self.send_response(200)
