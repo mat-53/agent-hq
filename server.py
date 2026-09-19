@@ -36,16 +36,24 @@ NEIGHBORS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
 SUMMARY_RULE = ("\n\nWhen you are finished, end your reply with a line 'SUMMARY:' followed by at most 6 short "
                 "lines that your teammates can read. Put nothing after the summary.")
 DIRECTOR_MARK = "You are the Director of a small company of AI agents."
-DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents and pass information between them.
-To act, end your reply with ONE json block, exactly like this:
+DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents, and create and delete agents and platforms, and pass information between them.
+The owner's projects are called PLATFORMS (for example Main or Research). Agents always belong to a platform.
+To act, end your reply with ONE json block listing actions, exactly like this:
 ```json
 {"actions":[{"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]}]}
 ```
+Available action types (each entry is a dict with a "type"):
+- {"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]} -- give a task to a worker. "include_notes_from" is optional: it gives the agent the latest summary of teammates whose findings help with the task.
+- {"type":"create_platform","name":"<platform name>"} -- create a new empty platform (e.g. "Research") when the work needs a new area.
+- {"type":"create_agent","name":"<agent name>","role":"<role>","platform":"<platform name or id>","backend":"<optional, default claude>","model":"<optional>"} -- create a new worker agent on an existing platform. "backend" is optional (default "claude"); "model" is optional (a sensible default is picked).
+- {"type":"delete_platform","name":"<platform name or id>"} -- delete a platform. It is rejected if the platform still has agents or does not exist. If two platforms share a name, give the id instead.
+- {"type":"delete_agent","name":"<agent name>"} -- delete an agent. It is rejected while the agent is working.
+- {"type":"move_agent","agent":"<agent name>","platform":"<platform name or id>"} -- move an agent onto another platform (e.g. regroup workers). It is rejected while the agent is working, if the platform does not exist, or if several platforms share the name (then give the id).
 Rules:
 - Only assign to agents whose status is idle, done or failed. Never assign to an agent that is working.
-- "include_notes_from" is optional. It gives the agent the latest summary of teammates whose findings help with the task.
 - Give each task clear success criteria. Agents end their work with a short SUMMARY.
-- If nothing needs to be delegated, write only a short plain reply without a json block.
+- Agent names and platform names are unique (ignoring case and surrounding spaces). Before create_agent or assign, check the AGENTS list. Before create_platform or delete_platform, check the PLATFORMS list (it shows every platform, its id and agent count); empty platforms are listed too. If two platforms share a name, use the id.
+- If nothing needs to be done, write only a short plain reply without a json block.
 - Keep replies short. Answer in the owner's language."""
 
 
@@ -190,7 +198,7 @@ def add_chat(role, text):
 def write_notes(a):
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     proj = projects.get(a["project"], {}).get("name", "?")
-    parts = [f"# {a['name']}", f"Project: {proj}", f"Role: {a['role'] or '-'}",
+    parts = [f"# {a['name']}", f"Platform: {proj}", f"Role: {a['role'] or '-'}",
              f"Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}", "", "## Latest summary", a["summary"] or "(no work yet)",
              "", "## Earlier work"]
     for h in a["history"][1:]:
@@ -240,7 +248,7 @@ def run_mock(agent, task):
         lines = [ln for ln in task.split("CONVERSATION (oldest first):", 1)[-1].strip().splitlines() if ln.strip()]
         if len(lines) >= 2 and lines[-2].startswith("System:"):
             return "Reviewed the results. Nothing more to do right now."
-        m = re.search(r"^- (.+?) \| project", task, re.M)
+        m = re.search(r"^- (.+?) \| platform", task, re.M)
         if not m:
             return "You have no agents yet. Add one first."
         act = {"actions": [{"type": "assign", "agent": m.group(1), "task": "Introduce yourself in one sentence."}]}
@@ -280,13 +288,18 @@ def run_claude(agent, task):
     exe = find_claude()
     if not exe:
         raise RuntimeError("The claude CLI was not found. Install Claude Code, or set CLAUDE_EXE in .env.")
-    cwd = Path(tempfile.gettempdir()) / "agent-hq-claude"
-    cwd.mkdir(exist_ok=True)
+    # Each agent gets its own folder so concurrent claude runs never share a working directory:
+    # two claude CLI processes in the same cwd can collide on Claude Code's per-directory state
+    # and one silently exits (return code 0, no output) - the cause of the "Claude CLI failed:
+    # exit code 0" failure seen for Sonnet Coder while the Director ran at the same time.
+    cwd = Path(tempfile.gettempdir()) / "agent-hq-claude" / slug(agent.get("name") or agent["id"])
+    cwd.mkdir(parents=True, exist_ok=True)
     system = "You are one AI agent in a small company. Follow the instructions directly and concisely."
     if agent["role"]:
         system += " Your role: " + agent["role"]
-    cmd = [exe, "-p", "--model", agent["model"], "--tools", "x", "--strict-mcp-config", "--no-session-persistence",
-           "--setting-sources", "project", "--disable-slash-commands", "--system-prompt", system]
+    cmd = [exe, "-p", "--model", agent["model"], "--tools", "default", "--strict-mcp-config", "--no-session-persistence",
+           "--setting-sources", "project", "--disable-slash-commands", "--dangerously-skip-permissions",
+           "--system-prompt", system]
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=CLAUDE_TIMEOUT, cwd=str(cwd), env=clean_env(),
@@ -410,7 +423,7 @@ RUNNERS = {"mock": run_mock, "openrouter": run_openrouter, "gemini": run_gemini,
 
 def find_agent(name):
     name = str(name).strip().lower()
-    return next((a for a in agents.values() if a["name"].lower() == name), None)
+    return next((a for a in agents.values() if a["name"].strip().lower() == name), None)
 
 
 def context_from(names, exclude):
@@ -483,12 +496,17 @@ def build_director_prompt(d):
         if a.get("isDirector"):
             continue
         pname = projects.get(a["project"], {}).get("name", "?")
-        roster.append(f"- {a['name']} | project: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
+        roster.append(f"- {a['name']} | platform: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
                       f"\n  latest summary: {(a['summary'] or '(no work yet)')[:600]}".replace("\r", ""))
+    platforms = []
+    for p in sorted(projects.values(), key=lambda x: x["created"]):
+        n = sum(1 for a in agents.values() if a["project"] == p["id"])
+        platforms.append(f"- {p['name']} | id: {p['id']} | agents: {n}")
     label = {"user": "Owner", "director": "Director", "system": "System"}
     convo = "\n".join(f"{label.get(m['role'], 'System')}: {re.sub(r'\s+', ' ', m['text'])[:700]}" for m in chat[-14:])
     extra = f"\n\nExtra instructions from the owner: {d['role']}" if d["role"] else ""
-    return (f"{DIRECTOR_RULES}{extra}\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
+    return (f"{DIRECTOR_RULES}{extra}\n\nPLATFORMS:\n" + ("\n".join(platforms) or "(no platforms yet)") +
+            "\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
             "\n\nCONVERSATION (oldest first):\n" + convo + "\n\nWrite the Director's next message.")
 
 
@@ -549,19 +567,147 @@ def director_run(snap, prompt):
     try_review()
 
 
-def run_action(act):
-    if not isinstance(act, dict) or act.get("type") != "assign":
-        return "Skipped an unknown action."
-    target, task = find_agent(act.get("agent", "")), act.get("task")
-    if not target or target.get("isDirector"):
-        return f"Skipped: no agent named '{str(act.get('agent'))[:40]}'."
-    if not isinstance(task, str) or not task.strip():
-        return f"Skipped: empty task for {target['name']}."
+DEFAULT_MODELS = {"claude": "sonnet", "mock": "mock", "opencode": "opencode/big-pickle",
+                  "opencode-readonly": "opencode/big-pickle", "gemini": "gemini-3.1-flash-lite"}
+
+
+def auto_slot():
+    """Pick the first free hex slot for a new platform (caller must hold the lock)."""
+    if not projects:
+        return (0, 0)
+    taken = {(p["q"], p["r"]) for p in projects.values()}
+    for p in projects.values():
+        for dq, dr in NEIGHBORS:
+            if (p["q"] + dq, p["r"] + dr) not in taken:
+                return (p["q"] + dq, p["r"] + dr)
+    return None
+
+
+def find_project(key):
+    """Resolve a platform by id or by name (case-insensitive, surrounding whitespace ignored).
+    Returns (project dict, None) on success, or (None, error message)."""
+    if not key or not str(key).strip():
+        return None, "give a platform name or id"
+    key = str(key).strip()
+    if key in projects:
+        return projects[key], None
+    matches = [p for p in projects.values() if p["name"].strip().lower() == key.lower()]
+    if not matches:
+        return None, f"platform '{key[:40]}' not found"
+    if len(matches) > 1:
+        return None, (f"several platforms are named '{matches[0]['name']}'; give the id instead "
+                      f"({', '.join(p['id'] for p in matches)})")
+    return matches[0], None
+
+
+def dir_create_platform(act):
+    name = str(act.get("name", "")).strip()
+    if not name:
+        return "Skipped: create_platform needs a 'name'."
+    slot = auto_slot()
+    if slot is None:
+        return f"Could not create platform '{name}': no free spot next to a platform."
     try:
-        begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+        p = create_project({"name": name, "description": "", "q": slot[0], "r": slot[1]})
     except ApiError as e:
-        return f"Could not assign to {target['name']}: {e.message}."
-    return f"Assigned to {target['name']}: {task.strip()[:160]}"
+        return f"Could not create platform '{name}': {e.message}."
+    return f"Created platform '{p['name']}'."
+
+
+def dir_create_agent(act):
+    name, platform = str(act.get("name", "")).strip(), act.get("platform")
+    if not name:
+        return "Skipped: create_agent needs a 'name'."
+    if not platform:
+        return f"Skipped: create_agent for '{name}' needs a 'platform' (a platform name or id)."
+    p, err = find_project(str(platform))
+    if not p:
+        return (f"Skipped: could not create agent '{name}': {err}. "
+                "Create it first with create_platform.")
+    backend = str(act.get("backend") or "claude").strip() or "claude"
+    model = str(act.get("model") or "").strip() or DEFAULT_MODELS.get(backend, "")
+    role = str(act.get("role") or "").strip()
+    try:
+        agent = create_agent({"name": name, "role": role, "backend": backend, "model": model, "project": p["id"]})
+    except ApiError as e:
+        return f"Could not create agent '{name}': {e.message}."
+    return f"Created agent '{agent['name']}' on platform '{p['name']}' (backend {backend}, role {role or '-'})."
+
+
+def dir_delete_platform(act):
+    if not str(act.get("name", "")).strip():
+        return "Skipped: delete_platform needs a 'name' (a platform name or id)."
+    p, err = find_project(act.get("name"))
+    if not p:
+        return f"Could not delete platform '{str(act.get('name'))[:40]}': {err}."
+    try:
+        delete_project(p["id"])
+    except ApiError as e:
+        return f"Could not delete platform '{p['name']}': {e.message}."
+    return f"Deleted platform '{p['name']}'."
+
+
+def dir_delete_agent(act):
+    name = str(act.get("name", "")).strip()
+    if not name:
+        return "Skipped: delete_agent needs a 'name'."
+    target = find_agent(name)
+    if not target:
+        return f"Skipped: no agent named '{name[:40]}'."
+    if target.get("isDirector"):
+        return f"Could not delete agent '{target['name']}': it is the Director. Remove it in the UI if you must."
+    if target["status"] == "working":
+        return f"Could not delete agent '{target['name']}': it is working right now."
+    try:
+        delete_agent(target["id"])
+    except ApiError as e:
+        return f"Could not delete agent '{target['name']}': {e.message}."
+    return f"Deleted agent '{target['name']}'."
+
+
+def dir_move_agent(act):
+    name, platform = str(act.get("agent", "")).strip(), act.get("platform")
+    if not name:
+        return "Skipped: move_agent needs an 'agent' name."
+    if not platform:
+        return f"Skipped: move_agent for '{name}' needs a 'platform' (a platform name or id)."
+    target = find_agent(name)
+    if not target:
+        return f"Skipped: no agent named '{name[:40]}'."
+    try:
+        move_agent(target["id"], str(platform))
+    except ApiError as e:
+        return f"Could not move agent '{target['name']}': {e.message}."
+    p = projects[target["project"]]
+    return f"Moved agent '{target['name']}' to platform '{p['name']}'."
+
+
+def run_action(act):
+    if not isinstance(act, dict):
+        return "Skipped an unknown action."
+    kind = act.get("type")
+    if kind == "assign":
+        target, task = find_agent(act.get("agent", "")), act.get("task")
+        if not target or target.get("isDirector"):
+            return f"Skipped: no agent named '{str(act.get('agent'))[:40]}'."
+        if not isinstance(task, str) or not task.strip():
+            return f"Skipped: empty task for {target['name']}."
+        try:
+            begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+        except ApiError as e:
+            return f"Could not assign to {target['name']}: {e.message}."
+        return f"Assigned to {target['name']}: {task.strip()[:160]}"
+    if kind == "create_platform":
+        return dir_create_platform(act)
+    if kind == "create_agent":
+        return dir_create_agent(act)
+    if kind == "delete_platform":
+        return dir_delete_platform(act)
+    if kind == "delete_agent":
+        return dir_delete_agent(act)
+    if kind == "move_agent":
+        return dir_move_agent(act)
+    return "Skipped an unknown action."
 
 
 def try_review():
@@ -595,6 +741,9 @@ def create_project(d):
     if not all(isinstance(v, int) and not isinstance(v, bool) and -8 <= v <= 8 for v in (q, r)):
         raise ApiError(400, "Invalid platform position")
     with lock:
+        existing = next((p for p in projects.values() if p["name"].strip().lower() == name.lower()), None)
+        if existing:
+            raise ApiError(400, f"A platform named '{existing['name']}' already exists (id {existing['id']})")
         if len(projects) >= MAX_PROJECTS:
             raise ApiError(400, f"Platform limit ({MAX_PROJECTS}) reached")
         taken = {(p["q"], p["r"]) for p in projects.values()}
@@ -648,7 +797,7 @@ def create_agent(d):
             raise ApiError(400, "Choose a platform for this agent")
         if len(agents) >= MAX_AGENTS:
             raise ApiError(400, f"Agent limit ({MAX_AGENTS}) reached")
-        if find_agent(name):
+        if any(a["name"].strip().lower() == name.lower() for a in agents.values()):
             raise ApiError(400, "An agent with that name already exists")
         aid = uuid.uuid4().hex[:8]
         agent = {"id": aid, "name": name, "role": role, "backend": backend, "model": model, "project": d["project"],
@@ -690,6 +839,30 @@ def set_director(agent_id):
         save()
         broadcast()
     return {"ok": True}
+
+
+def move_agent(agent_id, platform_key):
+    """Move an agent onto another platform. Resolves the platform by id or by unique name."""
+    target, err = find_project(platform_key)
+    if not target:
+        code = 409 if str(err).startswith("several platforms") else 404 if str(err).startswith("platform") else 400
+        raise ApiError(code, err)
+    with lock:
+        a = agents.get(agent_id)
+        if not a:
+            raise ApiError(404, "Agent not found")
+        if a["status"] == "working":
+            raise ApiError(409, "This agent is working right now")
+        if a["project"] == target["id"]:
+            raise ApiError(409, f"{a['name']} is already on platform '{target['name']}'")
+        a["project"] = target["id"]
+        try:
+            write_notes(a)
+        except OSError as e:
+            print(f"Could not write notes: {e}", file=sys.stderr)
+        save()
+        broadcast()
+    return {"ok": True, "name": a["name"], "project": target["id"], "platform": target["name"]}
 
 
 def delete_agent(agent_id):
@@ -735,6 +908,7 @@ def read_notes(agent_id):
 
 ID = "([0-9a-f]{8})"
 TASK_ROUTE = re.compile(rf"^/api/agents/{ID}/task$")
+MOV_ROUTE = re.compile(rf"^/api/agents/{ID}/move$")
 DIRECTOR_ROUTE = re.compile(rf"^/api/agents/{ID}/director$")
 AGENT_ROUTE = re.compile(rf"^/api/agents/{ID}$")
 PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
@@ -835,6 +1009,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True})
         elif TASK_ROUTE.match(path):
             self._json(202, start_task(TASK_ROUTE.match(path).group(1), self._read_json()))
+        elif MOV_ROUTE.match(path):
+            data = self._read_json()
+            self._json(200, move_agent(MOV_ROUTE.match(path).group(1), (data or {}).get("platform", "")))
         elif DIRECTOR_ROUTE.match(path):
             self._json(200, set_director(DIRECTOR_ROUTE.match(path).group(1)))
         else:
