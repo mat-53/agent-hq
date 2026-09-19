@@ -158,6 +158,9 @@ def load():
     except (OSError, json.JSONDecodeError):
         print("Warning: could not read saved state, starting empty", file=sys.stderr)
         return
+    if not isinstance(stored, dict):
+        print("Warning: could not read saved state, starting empty", file=sys.stderr)
+        return
     now = time.time()
     for i, p in enumerate(stored.get("projects", [])):
         p.setdefault("created", now + i)
@@ -515,6 +518,9 @@ def parse_actions(text):
     for match in re.finditer(r"```json\s*(\{.*?\})\s*```", text, re.S):
         pass
     if not match:
+        i = text.rfind("```json")
+        if i != -1:
+            return text[:i].strip(), [], True
         return text.strip(), [], False
     cleaned = (text[:match.start()] + text[match.end():]).strip()
     try:
@@ -760,6 +766,28 @@ def create_project(d):
         return dict(p)
 
 
+def move_project(pid, d):
+    """Move a platform to another hex spot. The body must be a JSON object with integer q and r."""
+    if not isinstance(d, dict):
+        raise ApiError(400, "Invalid request")
+    q, r = d.get("q"), d.get("r")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and -8 <= v <= 8 for v in (q, r)):
+        raise ApiError(400, "Invalid platform position")
+    with lock:
+        p = projects.get(pid)
+        if not p:
+            raise ApiError(404, "Platform not found")
+        taken = {(x["q"], x["r"]) for x in projects.values() if x["id"] != pid}
+        if (q, r) in taken:
+            raise ApiError(400, "That spot is already taken")
+        if taken and not any((q + dq, r + dr) in taken for dq, dr in NEIGHBORS):
+            raise ApiError(400, "Place the platform next to an existing one")
+        p["q"], p["r"] = q, r
+        save()
+        broadcast()
+        return dict(p)
+
+
 def delete_project(pid):
     with lock:
         if pid not in projects:
@@ -912,6 +940,7 @@ MOV_ROUTE = re.compile(rf"^/api/agents/{ID}/move$")
 DIRECTOR_ROUTE = re.compile(rf"^/api/agents/{ID}/director$")
 AGENT_ROUTE = re.compile(rf"^/api/agents/{ID}$")
 PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
+PROJ_MOV_ROUTE = re.compile(rf"^/api/projects/{ID}/move$")
 NOTES_ROUTE = re.compile(rf"^/api/notes/{ID}$")
 MODELS_ROUTE = re.compile(r"^/api/models/(gemini|openrouter|opencode|opencode-readonly|claude)$")
 
@@ -1011,7 +1040,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(202, start_task(TASK_ROUTE.match(path).group(1), self._read_json()))
         elif MOV_ROUTE.match(path):
             data = self._read_json()
-            self._json(200, move_agent(MOV_ROUTE.match(path).group(1), (data or {}).get("platform", "")))
+            if not isinstance(data, dict):
+                raise ApiError(400, "Invalid request")
+            self._json(200, move_agent(MOV_ROUTE.match(path).group(1), data.get("platform", "")))
+        elif PROJ_MOV_ROUTE.match(path):
+            data = self._read_json()
+            if not isinstance(data, dict):
+                raise ApiError(400, "Invalid request")
+            self._json(200, move_project(PROJ_MOV_ROUTE.match(path).group(1), data))
         elif DIRECTOR_ROUTE.match(path):
             self._json(200, set_director(DIRECTOR_ROUTE.match(path).group(1)))
         else:
