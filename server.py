@@ -48,6 +48,7 @@ Available action types (each entry is a dict with a "type"):
 - {"type":"create_agent","name":"<agent name>","role":"<role>","platform":"<platform name or id>","backend":"<optional, default claude>","model":"<optional>"} -- create a new worker agent on an existing platform. "backend" is optional (default "claude"); "model" is optional (a sensible default is picked).
 - {"type":"delete_platform","name":"<platform name or id>"} -- delete a platform. It is rejected if the platform still has agents or does not exist. If two platforms share a name, give the id instead.
 - {"type":"delete_agent","name":"<agent name>"} -- delete an agent. It is rejected while the agent is working.
+- {"type":"move_agent","agent":"<agent name>","platform":"<platform name or id>"} -- move an agent onto another platform (e.g. regroup workers). It is rejected while the agent is working, if the platform does not exist, or if several platforms share the name (then give the id).
 Rules:
 - Only assign to agents whose status is idle, done or failed. Never assign to an agent that is working.
 - Give each task clear success criteria. Agents end their work with a short SUMMARY.
@@ -287,8 +288,12 @@ def run_claude(agent, task):
     exe = find_claude()
     if not exe:
         raise RuntimeError("The claude CLI was not found. Install Claude Code, or set CLAUDE_EXE in .env.")
-    cwd = Path(tempfile.gettempdir()) / "agent-hq-claude"
-    cwd.mkdir(exist_ok=True)
+    # Each agent gets its own folder so concurrent claude runs never share a working directory:
+    # two claude CLI processes in the same cwd can collide on Claude Code's per-directory state
+    # and one silently exits (return code 0, no output) - the cause of the "Claude CLI failed:
+    # exit code 0" failure seen for Sonnet Coder while the Director ran at the same time.
+    cwd = Path(tempfile.gettempdir()) / "agent-hq-claude" / slug(agent.get("name") or agent["id"])
+    cwd.mkdir(parents=True, exist_ok=True)
     system = "You are one AI agent in a small company. Follow the instructions directly and concisely."
     if agent["role"]:
         system += " Your role: " + agent["role"]
@@ -659,6 +664,23 @@ def dir_delete_agent(act):
     return f"Deleted agent '{target['name']}'."
 
 
+def dir_move_agent(act):
+    name, platform = str(act.get("agent", "")).strip(), act.get("platform")
+    if not name:
+        return "Skipped: move_agent needs an 'agent' name."
+    if not platform:
+        return f"Skipped: move_agent for '{name}' needs a 'platform' (a platform name or id)."
+    target = find_agent(name)
+    if not target:
+        return f"Skipped: no agent named '{name[:40]}'."
+    try:
+        move_agent(target["id"], str(platform))
+    except ApiError as e:
+        return f"Could not move agent '{target['name']}': {e.message}."
+    p = projects[target["project"]]
+    return f"Moved agent '{target['name']}' to platform '{p['name']}'."
+
+
 def run_action(act):
     if not isinstance(act, dict):
         return "Skipped an unknown action."
@@ -682,6 +704,8 @@ def run_action(act):
         return dir_delete_platform(act)
     if kind == "delete_agent":
         return dir_delete_agent(act)
+    if kind == "move_agent":
+        return dir_move_agent(act)
     return "Skipped an unknown action."
 
 
@@ -816,6 +840,30 @@ def set_director(agent_id):
     return {"ok": True}
 
 
+def move_agent(agent_id, platform_key):
+    """Move an agent onto another platform. Resolves the platform by id or by unique name."""
+    target, err = find_project(platform_key)
+    if not target:
+        code = 409 if str(err).startswith("several platforms") else 404 if str(err).startswith("platform") else 400
+        raise ApiError(code, err)
+    with lock:
+        a = agents.get(agent_id)
+        if not a:
+            raise ApiError(404, "Agent not found")
+        if a["status"] == "working":
+            raise ApiError(409, "This agent is working right now")
+        if a["project"] == target["id"]:
+            raise ApiError(409, f"{a['name']} is already on platform '{target['name']}'")
+        a["project"] = target["id"]
+        try:
+            write_notes(a)
+        except OSError as e:
+            print(f"Could not write notes: {e}", file=sys.stderr)
+        save()
+        broadcast()
+    return {"ok": True, "name": a["name"], "project": target["id"], "platform": target["name"]}
+
+
 def delete_agent(agent_id):
     with lock:
         if agents.pop(agent_id, None) is None:
@@ -859,6 +907,7 @@ def read_notes(agent_id):
 
 ID = "([0-9a-f]{8})"
 TASK_ROUTE = re.compile(rf"^/api/agents/{ID}/task$")
+MOV_ROUTE = re.compile(rf"^/api/agents/{ID}/move$")
 DIRECTOR_ROUTE = re.compile(rf"^/api/agents/{ID}/director$")
 AGENT_ROUTE = re.compile(rf"^/api/agents/{ID}$")
 PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
@@ -959,6 +1008,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True})
         elif TASK_ROUTE.match(path):
             self._json(202, start_task(TASK_ROUTE.match(path).group(1), self._read_json()))
+        elif MOV_ROUTE.match(path):
+            data = self._read_json()
+            self._json(200, move_agent(MOV_ROUTE.match(path).group(1), (data or {}).get("platform", "")))
         elif DIRECTOR_ROUTE.match(path):
             self._json(200, set_director(DIRECTOR_ROUTE.match(path).group(1)))
         else:

@@ -121,6 +121,10 @@ details summary{cursor:pointer;color:var(--mut)}
     </div>
     <p id="dirNote" class="mut" hidden>This is the Director. Talk to it in the chat bar at the bottom.</p>
     <p id="pLastTask" class="mut" hidden></p>
+    <div id="mvBox" class="view">
+      <h3>Move to another platform</h3>
+      <div class="row"><select id="pMove" aria-label="Platform to move this agent to"></select><button id="pMoveBtn">Move</button></div>
+    </div>
     <h3>Result</h3>
     <pre id="pOut"></pre>
     <details><summary>Notes file (what teammates see)</summary><pre id="pNotes"></pre></details>
@@ -679,6 +683,17 @@ function refreshPanel() {
   const last = $('#pLastTask');
   if ((a.status === 'done' || a.status === 'failed') && a.task) { last.textContent = 'Latest task: ' + a.task; last.hidden = false; }
   else last.hidden = true;
+  const mvSel = $('#pMove'), mvBox = $('#mvBox'), mvBtn = $('#pMoveBtn');
+  mvSel.replaceChildren();
+  const others = state.projects.filter(p => p.id !== a.project).sort((x, y) => x.name.localeCompare(y.name));
+  for (const p of others) {
+    const o = document.createElement('option'); o.value = p.id;
+    o.textContent = agentsOf(p.id).length ? p.name : p.name + ' (empty)';
+    mvSel.append(o);
+  }
+  mvBox.hidden = others.length === 0;
+  mvBtn.disabled = a.status === 'working';
+  mvSel.onchange = () => { mvBtn.disabled = a.status === 'working' || !mvSel.value; };
   const nsig = a.id + a.status + (a.finishedAt || '');
   if (nsig !== notesSig) { notesSig = nsig; loadNotes(a.id); }
   const sig = a.id + a.history.length + (a.history[0] ? a.history[0].finishedAt : '');
@@ -715,6 +730,15 @@ function armed(btn, label, action) {
   };
 }
 armed($('#pDel'), 'Delete agent', async () => { const a = cur(); if (a) { await api('DELETE', `/api/agents/${a.id}`); closePanel(); } });
+$('#pMoveBtn').onclick = async () => {
+  const a = cur(); if (!a || a.status === 'working') return;
+  const plat = $('#pMove').value;
+  if (!plat) return;
+  try {
+    const j = await api('POST', `/api/agents/${a.id}/move`, { platform: plat });
+    toast(`Moved ${a.name} to platform "${j.platform}".`);
+  } catch (e) { toast(e.message); }
+};
 
 // ---------- side panel: platform ----------
 function openProj(id) { selProj = id; selected = null; placing = false; syncPanel(); refreshProj(); }
