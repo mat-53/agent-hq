@@ -297,8 +297,9 @@ def run_claude(agent, task):
     system = "You are one AI agent in a small company. Follow the instructions directly and concisely."
     if agent["role"]:
         system += " Your role: " + agent["role"]
-    cmd = [exe, "-p", "--model", agent["model"], "--tools", "x", "--strict-mcp-config", "--no-session-persistence",
-           "--setting-sources", "project", "--disable-slash-commands", "--system-prompt", system]
+    cmd = [exe, "-p", "--model", agent["model"], "--tools", "default", "--strict-mcp-config", "--no-session-persistence",
+           "--setting-sources", "project", "--disable-slash-commands", "--dangerously-skip-permissions",
+           "--system-prompt", system]
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=CLAUDE_TIMEOUT, cwd=str(cwd), env=clean_env(),
