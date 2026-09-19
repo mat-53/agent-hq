@@ -120,6 +120,7 @@ details summary{cursor:pointer;color:var(--mut)}
       <div class="row"><button id="pRun" class="primary">Run task</button><span class="mut">Ctrl+Enter</span></div>
     </div>
     <p id="dirNote" class="mut" hidden>This is the Director. Talk to it in the chat bar at the bottom.</p>
+    <p id="pLastTask" class="mut" hidden></p>
     <h3>Result</h3>
     <pre id="pOut"></pre>
     <details><summary>Notes file (what teammates see)</summary><pre id="pNotes"></pre></details>
@@ -161,7 +162,7 @@ details summary{cursor:pointer;color:var(--mut)}
   <form id="pForm">
     <h2>New platform</h2>
     <label>Name<input id="nName" maxlength="40" required autocomplete="off" placeholder="e.g. Research"></label>
-    <label>What is this project about?<textarea id="nDesc" rows="3" maxlength="500"></textarea></label>
+    <label>What is this platform about?<textarea id="nDesc" rows="3" maxlength="500"></textarea></label>
     <p id="nErr" class="err" role="alert"></p>
     <div class="row"><button type="button" id="nCancel">Cancel</button><button id="nSubmit" class="primary">Create platform</button></div>
   </form>
@@ -675,6 +676,9 @@ function refreshPanel() {
   else if (a.status === 'failed') { out.textContent = a.error || 'Failed'; out.className = 'err'; }
   else if (a.status === 'done') { out.textContent = a.output; out.className = ''; }
   else { out.textContent = 'No task run yet.'; out.className = 'mut'; }
+  const last = $('#pLastTask');
+  if ((a.status === 'done' || a.status === 'failed') && a.task) { last.textContent = 'Latest task: ' + a.task; last.hidden = false; }
+  else last.hidden = true;
   const nsig = a.id + a.status + (a.finishedAt || '');
   if (nsig !== notesSig) { notesSig = nsig; loadNotes(a.id); }
   const sig = a.id + a.history.length + (a.history[0] ? a.history[0].finishedAt : '');

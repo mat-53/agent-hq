@@ -36,16 +36,21 @@ NEIGHBORS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
 SUMMARY_RULE = ("\n\nWhen you are finished, end your reply with a line 'SUMMARY:' followed by at most 6 short "
                 "lines that your teammates can read. Put nothing after the summary.")
 DIRECTOR_MARK = "You are the Director of a small company of AI agents."
-DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents and pass information between them.
-To act, end your reply with ONE json block, exactly like this:
+DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents, create agents and create platforms, and pass information between them.
+The owner's projects are called PLATFORMS (for example Main or Research). Agents always belong to a platform.
+To act, end your reply with ONE json block listing actions, exactly like this:
 ```json
 {"actions":[{"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]}]}
 ```
+Available action types (each entry is a dict with a "type"):
+- {"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]} -- give a task to a worker. "include_notes_from" is optional: it gives the agent the latest summary of teammates whose findings help with the task.
+- {"type":"create_platform","name":"<platform name>"} -- create a new empty platform (e.g. "Research") when the work needs a new area.
+- {"type":"create_agent","name":"<agent name>","role":"<role>","platform":"<platform name or id>","backend":"<optional, default claude>","model":"<optional>"} -- create a new worker agent on an existing platform. "backend" is optional (default "claude"); "model" is optional (a sensible default is picked).
 Rules:
 - Only assign to agents whose status is idle, done or failed. Never assign to an agent that is working.
-- "include_notes_from" is optional. It gives the agent the latest summary of teammates whose findings help with the task.
 - Give each task clear success criteria. Agents end their work with a short SUMMARY.
-- If nothing needs to be delegated, write only a short plain reply without a json block.
+- Before using create_agent, check the AGENTS list: agent names must be unique, and the platform must already exist (create it with create_platform first).
+- If nothing needs to be done, write only a short plain reply without a json block.
 - Keep replies short. Answer in the owner's language."""
 
 
@@ -190,7 +195,7 @@ def add_chat(role, text):
 def write_notes(a):
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     proj = projects.get(a["project"], {}).get("name", "?")
-    parts = [f"# {a['name']}", f"Project: {proj}", f"Role: {a['role'] or '-'}",
+    parts = [f"# {a['name']}", f"Platform: {proj}", f"Role: {a['role'] or '-'}",
              f"Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}", "", "## Latest summary", a["summary"] or "(no work yet)",
              "", "## Earlier work"]
     for h in a["history"][1:]:
@@ -240,7 +245,7 @@ def run_mock(agent, task):
         lines = [ln for ln in task.split("CONVERSATION (oldest first):", 1)[-1].strip().splitlines() if ln.strip()]
         if len(lines) >= 2 and lines[-2].startswith("System:"):
             return "Reviewed the results. Nothing more to do right now."
-        m = re.search(r"^- (.+?) \| project", task, re.M)
+        m = re.search(r"^- (.+?) \| platform", task, re.M)
         if not m:
             return "You have no agents yet. Add one first."
         act = {"actions": [{"type": "assign", "agent": m.group(1), "task": "Introduce yourself in one sentence."}]}
@@ -483,7 +488,7 @@ def build_director_prompt(d):
         if a.get("isDirector"):
             continue
         pname = projects.get(a["project"], {}).get("name", "?")
-        roster.append(f"- {a['name']} | project: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
+        roster.append(f"- {a['name']} | platform: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
                       f"\n  latest summary: {(a['summary'] or '(no work yet)')[:600]}".replace("\r", ""))
     label = {"user": "Owner", "director": "Director", "system": "System"}
     convo = "\n".join(f"{label.get(m['role'], 'System')}: {re.sub(r'\s+', ' ', m['text'])[:700]}" for m in chat[-14:])
@@ -549,19 +554,80 @@ def director_run(snap, prompt):
     try_review()
 
 
-def run_action(act):
-    if not isinstance(act, dict) or act.get("type") != "assign":
-        return "Skipped an unknown action."
-    target, task = find_agent(act.get("agent", "")), act.get("task")
-    if not target or target.get("isDirector"):
-        return f"Skipped: no agent named '{str(act.get('agent'))[:40]}'."
-    if not isinstance(task, str) or not task.strip():
-        return f"Skipped: empty task for {target['name']}."
+DEFAULT_MODELS = {"claude": "sonnet", "mock": "mock", "opencode": "opencode/big-pickle",
+                  "opencode-readonly": "opencode/big-pickle", "gemini": "gemini-3.1-flash-lite"}
+
+
+def auto_slot():
+    """Pick the first free hex slot for a new platform (caller must hold the lock)."""
+    if not projects:
+        return (0, 0)
+    taken = {(p["q"], p["r"]) for p in projects.values()}
+    for p in projects.values():
+        for dq, dr in NEIGHBORS:
+            if (p["q"] + dq, p["r"] + dr) not in taken:
+                return (p["q"] + dq, p["r"] + dr)
+    return None
+
+
+def dir_create_platform(act):
+    name = str(act.get("name", "")).strip()
+    if not name:
+        return "Skipped: create_platform needs a 'name'."
+    slot = auto_slot()
+    if slot is None:
+        return f"Could not create platform '{name}': no free spot next to a platform."
     try:
-        begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+        p = create_project({"name": name, "description": "", "q": slot[0], "r": slot[1]})
     except ApiError as e:
-        return f"Could not assign to {target['name']}: {e.message}."
-    return f"Assigned to {target['name']}: {task.strip()[:160]}"
+        return f"Could not create platform '{name}': {e.message}."
+    return f"Created platform '{p['name']}'."
+
+
+def dir_create_agent(act):
+    name, platform = str(act.get("name", "")).strip(), act.get("platform")
+    if not name:
+        return "Skipped: create_agent needs a 'name'."
+    if not platform:
+        return f"Skipped: create_agent for '{name}' needs a 'platform' (a platform name or id)."
+    pid = str(platform)
+    if pid not in projects:
+        match = next((x for x in projects if projects[x]["name"].lower() == pid.lower()), None)
+        pid = match
+    if not pid:
+        return (f"Skipped: could not create agent '{name}': platform '{str(platform)[:40]}' not found. "
+                "Create it first with create_platform.")
+    backend = str(act.get("backend") or "claude").strip() or "claude"
+    model = str(act.get("model") or "").strip() or DEFAULT_MODELS.get(backend, "")
+    role = str(act.get("role") or "").strip()
+    try:
+        agent = create_agent({"name": name, "role": role, "backend": backend, "model": model, "project": pid})
+    except ApiError as e:
+        return f"Could not create agent '{name}': {e.message}."
+    pname = projects[pid]["name"]
+    return f"Created agent '{agent['name']}' on platform '{pname}' (backend {backend}, role {role or '-'})."
+
+
+def run_action(act):
+    if not isinstance(act, dict):
+        return "Skipped an unknown action."
+    kind = act.get("type")
+    if kind == "assign":
+        target, task = find_agent(act.get("agent", "")), act.get("task")
+        if not target or target.get("isDirector"):
+            return f"Skipped: no agent named '{str(act.get('agent'))[:40]}'."
+        if not isinstance(task, str) or not task.strip():
+            return f"Skipped: empty task for {target['name']}."
+        try:
+            begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+        except ApiError as e:
+            return f"Could not assign to {target['name']}: {e.message}."
+        return f"Assigned to {target['name']}: {task.strip()[:160]}"
+    if kind == "create_platform":
+        return dir_create_platform(act)
+    if kind == "create_agent":
+        return dir_create_agent(act)
+    return "Skipped an unknown action."
 
 
 def try_review():
