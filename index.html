@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent HQ</title>
+<style>
+:root{--bg:#1b1410;--panel:#241b16;--line:#4a3a2e;--txt:#f3e9dc;--mut:#b8a794;--acc:#f0a44b;--ok:#6fcf7f;--bad:#ef6a5b;--work:#f5d24a}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,"Segoe UI",sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:#33261e;border-radius:8px;padding:7px 14px}
+button:hover:not(:disabled){background:#42322a}
+button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--acc);border-color:var(--acc);color:#2a1a0a;font-weight:600}
+button.primary:hover:not(:disabled){background:#f6b566}
+button.danger{border-color:#7a3a33;color:#ff9a8c}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.mut{color:var(--mut)}
+.err{color:#ff9a8c}
+#bar{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;pointer-events:none;gap:12px}
+#bar>*{pointer-events:auto}
+.brand{display:flex;align-items:center;gap:12px;background:#1b1410cc;padding:8px 14px;border-radius:10px;border:1px solid var(--line)}
+.brand b{font-size:16px;letter-spacing:.3px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
+.dot.on{background:var(--ok)}
+#empty{position:fixed;left:0;right:0;top:78px;text-align:center;pointer-events:none;text-shadow:0 1px 3px #000}
+#empty b{font-size:18px}
+#panel{position:fixed;top:0;right:0;bottom:0;width:min(360px,100vw);background:var(--panel);border-left:1px solid var(--line);padding:16px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;display:flex;flex-direction:column;gap:10px}
+#panel.open{transform:none}
+#panel header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+#panel h2{margin:0;font-size:18px;word-break:break-word}
+#panel h3{margin:6px 0 0;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut)}
+#panel label{font-weight:600}
+textarea,input,select{width:100%;background:#17100c;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+textarea{resize:vertical}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#17100c;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto;font:12.5px/1.45 ui-monospace,Consolas,monospace}
+.row{display:flex;align-items:center;gap:10px}
+.pill{display:inline-block;align-self:flex-start;padding:2px 12px;border-radius:99px;font-weight:600;font-size:12px;text-transform:uppercase;background:#3a2d24}
+.pill.working{background:#5c4d12;color:var(--work)}
+.pill.done{background:#1d4227;color:var(--ok)}
+.pill.failed{background:#4d211c;color:#ff9a8c}
+details summary{cursor:pointer;color:var(--mut)}
+#pHist details{margin:6px 0}
+#pHist summary{color:var(--txt)}
+footer{margin-top:auto;padding-top:10px}
+.modal{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;padding:16px;z-index:5}
+.modal[hidden]{display:none}
+.modal form{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;width:min(440px,100%);display:flex;flex-direction:column;gap:12px;max-height:100%;overflow:auto}
+.modal h2{margin:0}
+.modal label{display:flex;flex-direction:column;gap:5px;font-weight:600}
+.modal p{margin:0;min-height:1em}
+.modal .row{justify-content:flex-end}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#3a1d19;border:1px solid #7a3a33;padding:9px 16px;border-radius:10px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .2s;z-index:9}
+#toast.show{opacity:1}
+@media (prefers-reduced-motion:reduce){#panel{transition:none}}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="bar">
+  <div class="brand"><b>Agent HQ</b><span id="stats" class="mut"></span><span id="conn" class="dot" title="Server connection"></span></div>
+  <button id="addBtn" class="primary">+ Add agent</button>
+</div>
+<div id="empty" hidden><b>No agents yet</b><br><span class="mut">Click the glowing platform (or “Add agent”) to create your first one.</span></div>
+
+<aside id="panel" aria-label="Agent details">
+  <header>
+    <div><h2 id="pName"></h2><div id="pMeta" class="mut"></div></div>
+    <button id="pClose" aria-label="Close panel">✕</button>
+  </header>
+  <div id="pStatus" class="pill"></div>
+  <details><summary>Role / instructions</summary><pre id="pRole"></pre></details>
+  <label for="pTask">Assign a task</label>
+  <textarea id="pTask" rows="4" placeholder="What should this agent do?"></textarea>
+  <div class="row"><button id="pRun" class="primary">Run task</button><span class="mut">Ctrl+Enter</span></div>
+  <h3>Result</h3>
+  <pre id="pOut"></pre>
+  <details><summary>History</summary><div id="pHist"></div></details>
+  <footer><button id="pDel" class="danger">Delete agent</button></footer>
+</aside>
+
+<div id="modal" class="modal" hidden>
+  <form id="mForm">
+    <h2>New agent</h2>
+    <label>Name<input id="mName" maxlength="40" required autocomplete="off"></label>
+    <label>Role / instructions<textarea id="mRole" rows="4" maxlength="2000" placeholder="e.g. You write clean Python. Reply with code only."></textarea></label>
+    <label>Worker<select id="mBackend"></select></label>
+    <label id="mModelWrap">Model<input id="mModel" maxlength="100" autocomplete="off"></label>
+    <p id="mHint" class="mut"></p>
+    <p id="mErr" class="err" role="alert"></p>
+    <div class="row"><button type="button" id="mCancel">Cancel</button><button id="mSubmit" class="primary">Create agent</button></div>
+  </form>
+</div>
+<div id="toast" role="status"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const cv = $('#cv'), ctx = cv.getContext('2d');
+let W = 0, H = 0;
+function resize() {
+  const d = devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+}
+addEventListener('resize', resize); resize();
+
+let state = { agents: [], backends: [] };
+let selected = null, hover = null, curDt = 0;
+const anim = new Map(), drafts = new Map();
+const cam = { tx: 0, ty: 0, s: 1, init: false };
+const R = 64, T = 12, SQ3 = Math.sqrt(3);
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------- hex grid (spiral of slots around the centre) ----------
+const DIRS = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+const slotCache = [[0, 0]]; let ringN = 0;
+function slotAxial(i) {
+  while (slotCache.length <= i) {
+    ringN++;
+    let q = -ringN, r = ringN;
+    for (let d = 0; d < 6; d++) for (let j = 0; j < ringN; j++) { slotCache.push([q, r]); q += DIRS[d][0]; r += DIRS[d][1]; }
+  }
+  return slotCache[i];
+}
+function slotPos(i) { const [q, r] = slotAxial(i); return { x: R * SQ3 * (q + r / 2), y: R * 1.5 * r }; }
+function nextSlot() { const used = new Set(state.agents.map(a => a.slot)); let i = 0; while (used.has(i)) i++; return i; }
+const hueOf = slot => (slot * 57 + 20) % 360;
+
+function hexPath(cx, cy, rad) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = Math.PI / 180 * (60 * i - 30), x = cx + rad * Math.cos(a), y = cy + rad * Math.sin(a);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+function inHex(dx, dy) {
+  const rad = R - 5; dx = Math.abs(dx); dy = Math.abs(dy);
+  return dx <= rad * SQ3 / 2 && dy <= rad - dx / SQ3;
+}
+
+// ---------- camera ----------
+function updateCamera() {
+  const slots = state.agents.map(a => a.slot).concat([nextSlot()]);
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  for (const s of slots) {
+    const p = slotPos(s);
+    x0 = Math.min(x0, p.x - R); x1 = Math.max(x1, p.x + R);
+    y0 = Math.min(y0, p.y - R - 40); y1 = Math.max(y1, p.y + R + T + 30);
+  }
+  const panelW = selected && W > 700 ? 360 : 0;
+  const s = Math.max(0.45, Math.min(1.25, (W - panelW - 60) / (x1 - x0), (H - 150) / (y1 - y0)));
+  const tx = (W - panelW) / 2 - (x0 + x1) / 2 * s, ty = (H + 40) / 2 - (y0 + y1) / 2 * s;
+  if (!cam.init) { Object.assign(cam, { tx, ty, s, init: true }); return; }
+  const k = reduceMotion ? 1 : 0.12;
+  cam.tx += (tx - cam.tx) * k; cam.ty += (ty - cam.ty) * k; cam.s += (s - cam.s) * k;
+}
+
+// ---------- drawing ----------
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#2b1d2e'); g.addColorStop(0.45, '#5a3a3a'); g.addColorStop(1, '#8a6238');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const sun = ctx.createRadialGradient(W * 0.78, H * 0.28, 0, W * 0.78, H * 0.28, H * 0.35);
+  sun.addColorStop(0, 'rgba(255,190,110,.55)'); sun.addColorStop(1, 'rgba(255,190,110,0)');
+  ctx.fillStyle = sun; ctx.fillRect(0, 0, W, H);
+  const bands = [['#7a5530', 0.66, 0.05, 0.6], ['#8f6a3c', 0.78, 0.06, 0.9], ['#a57b45', 0.9, 0.07, 1.2]];
+  for (const [c, base, amp, par] of bands) {
+    ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W + 20; x += 20) {
+      const u = x + cam.tx * par * 0.3;
+      ctx.lineTo(x, H * base + Math.sin(u / 180 + base * 10) * H * amp * 0.6 + Math.sin(u / 70) * H * amp * 0.15);
+    }
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawPlatform(x, y, hue, lift) {
+  const rad = R - 5;
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.beginPath(); ctx.ellipse(x + 8, y + T + 12, rad * 0.95, rad * 0.55, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = `hsl(${hue} 45% 28%)`;
+  for (let d = T; d >= 0; d -= 3) { hexPath(x, y - lift + d, rad); ctx.fill(); }
+  const g = ctx.createLinearGradient(x, y - rad - lift, x, y + rad - lift);
+  g.addColorStop(0, `hsl(${hue} 60% 64%)`); g.addColorStop(1, `hsl(${hue} 55% 47%)`);
+  ctx.fillStyle = g; hexPath(x, y - lift, rad); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.15)'; hexPath(x, y - lift, rad * 0.78); ctx.stroke();
+}
+
+function drawGhost(t) {
+  const p = slotPos(nextSlot()), hov = hover === 'ghost', pulse = 0.5 + 0.5 * Math.sin(t * 2.2);
+  ctx.save();
+  ctx.setLineDash([10, 8]); ctx.lineDashOffset = -t * 12;
+  ctx.strokeStyle = `rgba(255,240,210,${0.45 + pulse * 0.3 + (hov ? 0.25 : 0)})`; ctx.lineWidth = 3;
+  ctx.fillStyle = `rgba(255,240,210,${0.05 + pulse * 0.04 + (hov ? 0.1 : 0)})`;
+  hexPath(p.x, p.y, R - 5); ctx.fill(); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = `rgba(255,240,210,${0.7 + (hov ? 0.3 : 0)})`; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(p.x - 12, p.y); ctx.lineTo(p.x + 12, p.y); ctx.moveTo(p.x, p.y - 12); ctx.lineTo(p.x, p.y + 12); ctx.stroke();
+  ctx.font = '600 13px system-ui,"Segoe UI",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,240,210,.9)'; ctx.fillText('Add agent', p.x, p.y + R);
+  ctx.restore();
+}
+
+function drawMachine(x, y, a, t) {
+  const st = a.status, working = st === 'working';
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#4b4f57'; ctx.beginPath(); ctx.roundRect(-13, -24, 26, 30, 4); ctx.fill();
+  ctx.fillStyle = '#2a2d33'; ctx.fillRect(-9, -19, 18, 10);
+  if (working) { ctx.fillStyle = '#f5d24a'; for (let i = 0; i < 3; i++) ctx.fillRect(-7, -17 + i * 3, 6 + (Math.sin(t * 6 + i * 2) + 1) * 4, 2); }
+  else if (st === 'done') { ctx.fillStyle = '#6fcf7f'; ctx.fillRect(-7, -17, 14, 2); ctx.fillRect(-7, -14, 10, 2); }
+  else if (st === 'failed') { ctx.fillStyle = '#ef6a5b'; ctx.fillRect(-7, -17, 14, 2); }
+  ctx.fillStyle = working ? (Math.sin(t * 10) > 0 ? '#f5d24a' : '#6b5d20') : st === 'done' ? '#6fcf7f' : st === 'failed' ? '#ef6a5b' : '#555';
+  ctx.beginPath(); ctx.arc(8, -4, 2.5, 0, 7); ctx.fill();
+  if (working) {
+    ctx.strokeStyle = '#b9c0cc'; ctx.lineWidth = 2; ctx.save(); ctx.translate(-5, 0); ctx.rotate(t * 3); ctx.beginPath();
+    for (let i = 0; i < 6; i++) { const g = i * Math.PI / 3; ctx.moveTo(Math.cos(g) * 2, Math.sin(g) * 2); ctx.lineTo(Math.cos(g) * 5, Math.sin(g) * 5); }
+    ctx.stroke(); ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawRobot(x, y, a, t, an) {
+  const st = a.status, working = st === 'working', failed = st === 'failed', done = st === 'done';
+  const bob = working ? Math.sin(t * 12) * 1.4 : Math.sin(t * 2 + an.seed) * 1.1;
+  let hop = 0;
+  if (an.hopUntil > t) { const u = (an.hopUntil - t) / 0.7; hop = -Math.abs(Math.sin(u * Math.PI * 2)) * 16 * u; }
+  const shake = an.shakeUntil > t ? Math.sin(t * 60) * 2 : 0;
+  ctx.save(); ctx.translate(x + shake, y + hop);
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0, 0, 15, 5, 0, 0, 7); ctx.fill();
+  ctx.translate(0, bob * 0.5);
+  ctx.fillStyle = '#8c8377'; ctx.fillRect(-9, -8, 6, 8); ctx.fillRect(3, -8, 6, 8);
+  ctx.strokeStyle = '#bdb5a9'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-14, -26); ctx.lineTo(-19, -14); ctx.stroke();
+  const ang = working ? Math.sin(t * 14) * 0.9 : done ? 2.7 + Math.sin(t * 6) * 0.3 : 0.2;
+  ctx.beginPath(); ctx.moveTo(14, -26); ctx.lineTo(14 + Math.sin(ang) * 14, -26 + Math.cos(ang) * 14); ctx.stroke();
+  ctx.fillStyle = '#d9d4cc'; ctx.beginPath(); ctx.roundRect(-14, -38, 28, 32, 6); ctx.fill();
+  ctx.fillStyle = `hsl(${hueOf(a.slot)} 70% 55%)`; ctx.fillRect(-14, -24, 28, 5);
+  ctx.save(); ctx.translate(0, -38); if (failed) ctx.rotate(0.22);
+  ctx.fillStyle = '#e6e1d9'; ctx.beginPath(); ctx.roundRect(-12, -18, 24, 18, 5); ctx.fill();
+  ctx.fillStyle = '#20242b'; ctx.beginPath(); ctx.roundRect(-9, -14, 18, 9, 3); ctx.fill();
+  const eye = working ? '#ffe066' : done ? '#7dffa0' : '#7fe3ff';
+  if (failed) {
+    ctx.strokeStyle = '#ef6a5b'; ctx.lineWidth = 1.6;
+    for (const ex of [-4.5, 4.5]) { ctx.beginPath(); ctx.moveTo(ex - 2, -11.5); ctx.lineTo(ex + 2, -7.5); ctx.moveTo(ex + 2, -11.5); ctx.lineTo(ex - 2, -7.5); ctx.stroke(); }
+  } else {
+    const blink = !working && ((t + an.seed) % 4) < 0.12;
+    ctx.fillStyle = eye;
+    for (const ex of [-4.5, 4.5]) { ctx.beginPath(); ctx.ellipse(ex, -9.5, 2.2, blink ? 0.4 : 2.2, 0, 0, 7); ctx.fill(); }
+  }
+  ctx.strokeStyle = '#bdb5a9'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(0, -25); ctx.stroke();
+  ctx.fillStyle = working ? (Math.sin(t * 9) > 0 ? '#f5d24a' : '#8a7a2a') : done ? '#6fcf7f' : failed ? '#ef6a5b' : '#7c8a99';
+  ctx.beginPath(); ctx.arc(0, -27, 3.2, 0, 7); ctx.fill();
+  ctx.restore(); ctx.restore();
+}
+
+function drawBadge(x, y, kind) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = kind === 'done' ? '#3fae56' : '#d9503f'; ctx.beginPath(); ctx.arc(0, 0, 10, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+  if (kind === 'done') { ctx.moveTo(-4.5, 0.5); ctx.lineTo(-1.2, 3.8); ctx.lineTo(5, -3.5); }
+  else { ctx.moveTo(-3.5, -3.5); ctx.lineTo(3.5, 3.5); ctx.moveTo(3.5, -3.5); ctx.lineTo(-3.5, 3.5); }
+  ctx.stroke(); ctx.restore();
+}
+
+const shorten = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+function drawLabel(x, y, a, t) {
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = '600 13px system-ui,"Segoe UI",sans-serif';
+  let name = a.name;
+  while (name.length > 1 && ctx.measureText(name).width > 74) name = name.slice(0, -1);
+  if (name !== a.name) name = name.slice(0, -1) + '…';
+  const w = ctx.measureText(name).width + 30, h = 22, left = x - w / 2;
+  ctx.fillStyle = 'rgba(20,12,8,.75)'; ctx.beginPath(); ctx.roundRect(left, y, w, h, 11); ctx.fill();
+  ctx.fillStyle = { idle: '#9aa4b0', working: Math.sin(t * 9) > 0 ? '#f5d24a' : '#8a7a2a', done: '#6fcf7f', failed: '#ef6a5b' }[a.status];
+  ctx.beginPath(); ctx.arc(left + 12, y + h / 2, 4, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff8ee'; ctx.fillText(name, left + 22, y + h / 2 + 0.5);
+}
+
+// ---------- particles ----------
+const parts = [];
+function emit(p) { if (parts.length < 250) parts.push(p); }
+function stepParticles(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt;
+    if (p.life <= 0) { parts.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += p.g * dt;
+    const u = p.life / p.max;
+    ctx.globalAlpha = Math.min(1, u * 1.4) * (p.smoke ? 0.5 : 1);
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (p.smoke ? 1.6 - u * 0.6 : u), 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function animFor(a) {
+  let an = anim.get(a.id);
+  if (!an) { an = { seed: Math.random() * 6.28, prev: a.status, hopUntil: 0, shakeUntil: 0, emit: 0 }; anim.set(a.id, an); }
+  return an;
+}
+
+function drawAgent(a, t) {
+  const p = slotPos(a.slot), hue = hueOf(a.slot), an = animFor(a);
+  const lift = (hover === a.id ? 4 : 0) + (selected === a.id ? 3 : 0), working = a.status === 'working';
+  drawPlatform(p.x, p.y, hue, lift);
+  if (selected === a.id) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; hexPath(p.x, p.y - lift, R - 5); ctx.stroke(); }
+  if (working) {
+    ctx.save(); ctx.setLineDash([14, 10]); ctx.lineDashOffset = -t * 40;
+    ctx.strokeStyle = '#f5d24a'; ctx.lineWidth = 4; hexPath(p.x, p.y - lift, R - 11); ctx.stroke(); ctx.restore();
+  }
+  drawMachine(p.x + 26, p.y - lift + 6, a, t);
+  drawRobot(p.x - 8, p.y - lift + 8, a, t, an);
+  an.emit -= curDt;
+  if (an.emit <= 0 && !reduceMotion) {
+    if (working) {
+      an.emit = 0.07;
+      emit({ x: p.x + 26 + (Math.random() - 0.5) * 10, y: p.y - lift - 18, vx: (Math.random() - 0.5) * 80, vy: -40 - Math.random() * 40, g: 160, life: 0.5, max: 0.5, size: 2.2, color: Math.random() > 0.5 ? '#ffd45a' : '#ff9a3c' });
+    } else if (a.status === 'failed') {
+      an.emit = 0.25;
+      emit({ x: p.x - 8 + (Math.random() - 0.5) * 6, y: p.y - lift - 34, vx: (Math.random() - 0.5) * 10, vy: -22, g: 0, life: 1.2, max: 1.2, size: 5, color: '#777', smoke: true });
+    }
+  }
+}
+
+function drawOverlays(a, t) {
+  const p = slotPos(a.slot), an = animFor(a);
+  const lift = (hover === a.id ? 4 : 0) + (selected === a.id ? 3 : 0);
+  if (a.status === 'done' || a.status === 'failed') drawBadge(p.x - 8, p.y - lift - 62 + Math.sin(t * 3 + an.seed) * 2, a.status);
+  drawLabel(p.x, p.y - lift + 36, a, t);
+}
+
+function draw(t) {
+  const d = devicePixelRatio || 1;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  drawBackground();
+  ctx.save(); ctx.translate(cam.tx, cam.ty); ctx.scale(cam.s, cam.s);
+  const items = state.agents.slice().sort((a, b) => slotPos(a.slot).y - slotPos(b.slot).y);
+  drawGhost(t);
+  for (const a of items) drawAgent(a, t);
+  stepParticles(curDt);
+  for (const a of items) drawOverlays(a, t);
+  ctx.restore();
+}
+
+let lastTs = performance.now();
+function frame(now) {
+  curDt = Math.min(0.05, (now - lastTs) / 1000); lastTs = now;
+  updateCamera(); draw(now / 1000);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- interaction ----------
+function pick(mx, my) {
+  const wx = (mx - cam.tx) / cam.s, wy = (my - cam.ty) / cam.s;
+  for (const a of state.agents) { const p = slotPos(a.slot); if (inHex(wx - p.x, wy - p.y)) return a.id; }
+  const g = slotPos(nextSlot());
+  return inHex(wx - g.x, wy - g.y) ? 'ghost' : null;
+}
+cv.addEventListener('pointermove', e => { hover = pick(e.clientX, e.clientY); cv.style.cursor = hover ? 'pointer' : 'default'; });
+cv.addEventListener('pointerleave', () => { hover = null; });
+cv.addEventListener('click', e => {
+  const h = pick(e.clientX, e.clientY);
+  if (h === 'ghost') openModal(); else if (h) openPanel(h); else closePanel();
+});
+
+// ---------- API + live state ----------
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Request failed (HTTP ' + r.status + ')');
+  return j;
+}
+let toastTimer;
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+function onState(s) {
+  const now = performance.now() / 1000, ids = new Set();
+  for (const a of s.agents) {
+    ids.add(a.id);
+    const an = animFor(a);
+    if (an.prev !== a.status) {
+      if (an.prev === 'working' && a.status === 'done') an.hopUntil = now + 0.7;
+      if (a.status === 'failed') an.shakeUntil = now + 0.5;
+      an.prev = a.status;
+    }
+  }
+  for (const id of [...anim.keys()]) if (!ids.has(id)) anim.delete(id);
+  state = s;
+  const n = s.agents.length, w = s.agents.filter(a => a.status === 'working').length;
+  $('#stats').textContent = n ? `${n} agent${n > 1 ? 's' : ''}${w ? ' · ' + w + ' working' : ''}` : '';
+  $('#empty').hidden = n > 0;
+  if (selected) refreshPanel();
+}
+const es = new EventSource('/api/events');
+es.onmessage = e => onState(JSON.parse(e.data));
+es.onopen = () => $('#conn').classList.add('on');
+es.onerror = () => $('#conn').classList.remove('on');
+
+// ---------- detail panel ----------
+const cur = () => state.agents.find(a => a.id === selected);
+const backendLabel = id => (state.backends.find(b => b.id === id) || {}).label || id;
+let histSig = '';
+function openPanel(id) {
+  selected = id; histSig = '';
+  $('#panel').classList.add('open');
+  $('#pTask').value = drafts.get(id) || '';
+  if (cur()) refreshPanel();
+}
+function closePanel() { selected = null; $('#panel').classList.remove('open'); }
+function refreshPanel() {
+  const a = cur();
+  if (!a) { closePanel(); return; }
+  $('#pName').textContent = a.name;
+  $('#pMeta').textContent = a.backend === 'mock' ? 'Mock worker'
+    : a.backend === 'opencode' ? `${a.model} · folder: workspaces/${a.id}`
+    : `${backendLabel(a.backend)} · ${a.model}`;
+  const pill = $('#pStatus'); pill.textContent = a.status; pill.className = 'pill ' + a.status;
+  $('#pRole').textContent = a.role || '(none)';
+  $('#pRun').disabled = a.status === 'working';
+  const out = $('#pOut');
+  if (a.status === 'working') { out.textContent = `Working on: ${a.task}\n(${Math.max(0, Math.round(Date.now() / 1000 - a.startedAt))}s)`; out.className = ''; }
+  else if (a.status === 'failed') { out.textContent = a.error || 'Failed'; out.className = 'err'; }
+  else if (a.status === 'done') { out.textContent = a.output; out.className = ''; }
+  else { out.textContent = 'No task run yet.'; out.className = 'mut'; }
+  const sig = a.id + a.history.length + (a.history[0] ? a.history[0].finishedAt : '');
+  if (sig !== histSig) {
+    histSig = sig;
+    const box = $('#pHist'); box.replaceChildren();
+    if (!a.history.length) { const p = document.createElement('p'); p.className = 'mut'; p.textContent = 'Nothing yet.'; box.append(p); }
+    for (const h of a.history) {
+      const d = document.createElement('details'), s = document.createElement('summary'), pre = document.createElement('pre');
+      s.textContent = `${h.status === 'done' ? '✓' : '✗'} ${shorten(h.task.replace(/\s+/g, ' '), 46)}`;
+      pre.textContent = h.status === 'done' ? h.output : h.error;
+      d.append(s, pre); box.append(d);
+    }
+  }
+}
+setInterval(() => { const a = cur(); if (a && a.status === 'working') refreshPanel(); }, 1000);
+
+$('#pClose').onclick = closePanel;
+$('#pTask').addEventListener('input', () => { if (selected) drafts.set(selected, $('#pTask').value); });
+$('#pTask').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runTask(); } });
+$('#pRun').onclick = runTask;
+async function runTask() {
+  const a = cur(); if (!a || a.status === 'working') return;
+  const task = $('#pTask').value.trim();
+  if (!task) { toast('Type a task first.'); return; }
+  try { await api('POST', `/api/agents/${a.id}/task`, { task }); drafts.delete(a.id); $('#pTask').value = ''; }
+  catch (e) { toast(e.message); }
+}
+let delTimer;
+$('#pDel').onclick = async () => {
+  const b = $('#pDel');
+  if (!b.dataset.armed) {
+    b.dataset.armed = '1'; b.textContent = 'Click again to confirm';
+    delTimer = setTimeout(() => { delete b.dataset.armed; b.textContent = 'Delete agent'; }, 3000);
+    return;
+  }
+  clearTimeout(delTimer); delete b.dataset.armed; b.textContent = 'Delete agent';
+  const a = cur(); if (!a) return;
+  try { await api('DELETE', `/api/agents/${a.id}`); closePanel(); } catch (e) { toast(e.message); }
+};
+
+// ---------- add-agent dialog ----------
+function updateModalHint() {
+  const b = state.backends.find(x => x.id === $('#mBackend').value);
+  const isMock = !b || b.id === 'mock';
+  $('#mModelWrap').hidden = isMock;
+  $('#mModel').required = !isMock;
+  const oc = !!b && b.id.startsWith('opencode');
+  $('#mModel').placeholder = oc ? 'opencode/big-pickle' : b && b.id === 'openrouter' ? 'model id, e.g. a name from openrouter.ai/models ending in :free' : 'model id from Google AI Studio';
+  if (oc && !$('#mModel').value) $('#mModel').value = 'opencode/big-pickle';
+  else if (!oc && $('#mModel').value.startsWith('opencode/')) $('#mModel').value = '';
+  $('#mHint').textContent = isMock ? 'Simulates work with no API call. Use it to try the system.'
+    : !b.ready ? (b.needsKey ? `Missing ${b.needsKey}: add it to the .env file next to server.py and restart the server, or the agent will fail.` : b.missing)
+    : (b.note || 'API key found.');
+}
+function openModal() {
+  const sel = $('#mBackend'); sel.replaceChildren();
+  for (const b of state.backends) { const o = document.createElement('option'); o.value = b.id; o.textContent = b.label + (b.ready ? '' : ' (no key yet)'); sel.append(o); }
+  $('#mName').value = ''; $('#mRole').value = ''; $('#mModel').value = ''; $('#mErr').textContent = '';
+  updateModalHint(); $('#modal').hidden = false; $('#mName').focus();
+}
+function closeModal() { $('#modal').hidden = true; }
+$('#addBtn').onclick = openModal;
+$('#mCancel').onclick = closeModal;
+$('#mBackend').onchange = updateModalHint;
+$('#modal').addEventListener('mousedown', e => { if (e.target === $('#modal')) closeModal(); });
+$('#mForm').onsubmit = async e => {
+  e.preventDefault();
+  const btn = $('#mSubmit'); btn.disabled = true; $('#mErr').textContent = '';
+  try {
+    const a = await api('POST', '/api/agents', { name: $('#mName').value, role: $('#mRole').value, backend: $('#mBackend').value, model: $('#mModel').value });
+    if (!state.agents.some(x => x.id === a.id)) state.agents.push(a);
+    closeModal(); openPanel(a.id);
+  } catch (err) { $('#mErr').textContent = err.message; }
+  finally { btn.disabled = false; }
+};
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#modal').hidden) closeModal(); else closePanel();
+});
+</script>
+</body>
+</html>
