@@ -39,6 +39,12 @@ body.panel-open #chat{right:376px}
 .msg.system{align-self:stretch;max-width:100%;color:var(--mut);font-size:12.5px;background:none;padding:1px 4px}
 .chatbar{display:flex;gap:8px;background:#1b1410ee;border:1px solid var(--line);border-radius:12px;padding:8px}
 .chatbar input{flex:1;min-width:0}
+.miclang{flex:0 0 auto;width:auto;padding:7px 8px;background:#17100c;font-size:12px}
+#micBtn{flex:0 0 auto;width:38px;padding:7px 0;display:inline-flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s}
+#micBtn svg{display:block}
+#micBtn.rec{background:#7a241d;border-color:#ef6a5b;color:#fff;animation:micPulse 1.2s ease-in-out infinite}
+#micBtn:disabled{opacity:.45;cursor:not-allowed}
+@keyframes micPulse{0%,100%{box-shadow:0 0 0 4px rgba(239,106,91,.25)}50%{box-shadow:0 0 0 9px rgba(239,106,91,.5)}}
 #chatMeta{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--mut);padding:0 6px;text-shadow:0 1px 2px #000}
 #chatMeta label{display:flex;align-items:center;gap:6px;cursor:pointer}
 #chatMeta input{width:auto}
@@ -93,6 +99,8 @@ details summary{cursor:pointer;color:var(--mut)}
   <div class="chatbar">
     <button id="chatToggle" title="Show or hide the conversation" aria-label="Toggle conversation">▲</button>
     <input id="chatIn" maxlength="4000" autocomplete="off">
+    <select id="micLang" class="miclang" title="Dictation language" aria-label="Dictation language"></select>
+    <button id="micBtn" title="Start voice dictation" aria-label="Start voice dictation"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10v1a7 7 0 0 0 14 0v-1"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg></button>
     <button id="chatSend" class="primary">Send</button>
   </div>
   <div id="chatMeta"><span id="chatStatus"></span><label><input id="autoRev" type="checkbox">Director follows up when agents finish</label></div>
@@ -550,14 +558,87 @@ function renderChat() {
   $('#autoRev').checked = state.autoReview;
 }
 async function sendChat() {
+  micStop();
   const t = $('#chatIn').value.trim();
   if (!t || !state.director || state.busy) return;
   try { await api('POST', '/api/chat', { text: t }); $('#chatIn').value = ''; chatOpen = true; } catch (e) { toast(e.message); }
 }
 $('#chatSend').onclick = sendChat;
-$('#chatIn').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+$('#chatIn').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  else if (e.code === 'Space' && e.ctrlKey) { e.preventDefault(); micToggle(); }
+});
 $('#chatToggle').onclick = () => { chatOpen = !chatOpen; renderChat(); };
 $('#autoRev').onchange = e => api('POST', '/api/autoreview', { on: e.target.checked }).catch(err => toast(err.message));
+
+// ---------- voice dictation ----------
+const V_LANGS = ['en-US', 'de-DE', 'tr-TR'];
+let micRec = null, micOn = false, voiceBase = '', voiceFinal = '', voiceInterim = '';
+function micAppend(dst, seg) {
+  if (!seg) return dst;
+  return dst && /\s$/.test(dst) ? dst + seg : dst + (dst ? ' ' : '') + seg;
+}
+function micInit() {
+  const sel = $('#micLang'); sel.replaceChildren();
+  for (const l of V_LANGS) { const o = document.createElement('option'); o.value = l; o.textContent = l; sel.append(o); }
+  let saved = null; try { saved = localStorage.getItem('micLang'); } catch (e) {}
+  sel.value = V_LANGS.includes(saved) ? saved : V_LANGS.includes(navigator.language) ? navigator.language : 'en-US';
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    $('#micBtn').disabled = true; $('#micBtn').title = 'Voice input needs Chrome or Edge';
+    $('#micLang').disabled = true;
+  }
+}
+function micUI() {
+  const btn = $('#micBtn');
+  btn.classList.toggle('rec', micOn);
+  btn.title = micOn ? 'Stop voice dictation' : 'Start voice dictation';
+}
+function micOnResult(e) {
+  let interim = '';
+  for (let i = e.resultIndex; i < e.results.length; i++) {
+    const r = e.results[i], seg = r[0].transcript;
+    if (r.isFinal) voiceFinal = micAppend(voiceFinal, seg);
+    else interim = micAppend(interim, seg);
+  }
+  voiceInterim = interim;
+  const input = $('#chatIn');
+  input.value = voiceBase + voiceFinal + voiceInterim;
+  input.scrollLeft = input.scrollWidth;
+}
+function micOnError(e) {
+  if (e.error === 'aborted') return;
+  const map = { 'not-allowed': 'Microphone access is blocked. Allow it and try again.', 'service-not-allowed': 'Voice input is not permitted.', 'no-speech': 'No speech was heard.', 'network': 'Speech recognition failed (network).', 'audio-capture': 'No microphone found.' };
+  micOn = false; micUI();
+  toast(map[e.error] || ('Voice input error: ' + e.error));
+}
+function micStart() {
+  if (micOn || $('#micBtn').disabled) return;
+  voiceBase = $('#chatIn').value; voiceFinal = ''; voiceInterim = '';
+  micOn = true; micUI();
+  const r = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+  r.lang = $('#micLang').value;
+  r.continuous = true;
+  r.interimResults = true;
+  r.onresult = micOnResult;
+  r.onerror = micOnError;
+  r.onend = () => {
+    if (micOn) setTimeout(() => { if (micOn) { try { r.start(); } catch (err) { micOn = false; micUI(); } } }, 100);
+    else micRec = null;
+  };
+  micRec = r;
+  try { r.start(); } catch (err) { micOn = false; micUI(); toast('Could not start voice input.'); }
+}
+function micStop() {
+  micOn = false; micUI();
+  if (micRec) { try { micRec.stop(); } catch (err) {} micRec = null; }
+}
+function micToggle() { micOn ? micStop() : micStart(); }
+micInit();
+$('#micLang').onchange = () => {
+  try { localStorage.setItem('micLang', $('#micLang').value); } catch (e) {}
+  if (micRec) micRec.lang = $('#micLang').value;
+};
+$('#micBtn').onclick = micToggle;
 
 // ---------- side panel: agent ----------
 const cur = () => state.agents.find(a => a.id === selected);
