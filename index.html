@@ -721,7 +721,7 @@ function openProj(id) { selProj = id; selected = null; placing = false; syncPane
 function refreshProj() {
   const p = curProj();
   if (!p) { closePanel(); return; }
-  $('#jName').textContent = p.name; $('#jDesc').textContent = p.description || '(no description)';
+  $('#jName').textContent = p.name; $('#jDesc').textContent = `id: ${p.id}` + (p.description ? ' · ' + p.description : '');
   const box = $('#jList'); box.replaceChildren();
   const list = agentsOf(p.id);
   if (!list.length) { const m = document.createElement('p'); m.className = 'mut'; m.textContent = 'No agents here yet.'; box.append(m); }

@@ -36,7 +36,7 @@ NEIGHBORS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
 SUMMARY_RULE = ("\n\nWhen you are finished, end your reply with a line 'SUMMARY:' followed by at most 6 short "
                 "lines that your teammates can read. Put nothing after the summary.")
 DIRECTOR_MARK = "You are the Director of a small company of AI agents."
-DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents, create agents and create platforms, and pass information between them.
+DIRECTOR_RULES = DIRECTOR_MARK + """ The human owner talks only to you. You never do the work yourself: you delegate to agents, and create and delete agents and platforms, and pass information between them.
 The owner's projects are called PLATFORMS (for example Main or Research). Agents always belong to a platform.
 To act, end your reply with ONE json block listing actions, exactly like this:
 ```json
@@ -46,10 +46,12 @@ Available action types (each entry is a dict with a "type"):
 - {"type":"assign","agent":"<agent name>","task":"<complete, self-contained instructions>","include_notes_from":["<other agent name>"]} -- give a task to a worker. "include_notes_from" is optional: it gives the agent the latest summary of teammates whose findings help with the task.
 - {"type":"create_platform","name":"<platform name>"} -- create a new empty platform (e.g. "Research") when the work needs a new area.
 - {"type":"create_agent","name":"<agent name>","role":"<role>","platform":"<platform name or id>","backend":"<optional, default claude>","model":"<optional>"} -- create a new worker agent on an existing platform. "backend" is optional (default "claude"); "model" is optional (a sensible default is picked).
+- {"type":"delete_platform","name":"<platform name or id>"} -- delete a platform. It is rejected if the platform still has agents or does not exist. If two platforms share a name, give the id instead.
+- {"type":"delete_agent","name":"<agent name>"} -- delete an agent. It is rejected while the agent is working.
 Rules:
 - Only assign to agents whose status is idle, done or failed. Never assign to an agent that is working.
 - Give each task clear success criteria. Agents end their work with a short SUMMARY.
-- Before using create_agent, check the AGENTS list: agent names must be unique, and the platform must already exist (create it with create_platform first).
+- Agent names and platform names are unique (ignoring case and surrounding spaces). Before create_agent or assign, check the AGENTS list. Before create_platform or delete_platform, check the PLATFORMS list (it shows every platform, its id and agent count); empty platforms are listed too. If two platforms share a name, use the id.
 - If nothing needs to be done, write only a short plain reply without a json block.
 - Keep replies short. Answer in the owner's language."""
 
@@ -415,7 +417,7 @@ RUNNERS = {"mock": run_mock, "openrouter": run_openrouter, "gemini": run_gemini,
 
 def find_agent(name):
     name = str(name).strip().lower()
-    return next((a for a in agents.values() if a["name"].lower() == name), None)
+    return next((a for a in agents.values() if a["name"].strip().lower() == name), None)
 
 
 def context_from(names, exclude):
@@ -490,10 +492,15 @@ def build_director_prompt(d):
         pname = projects.get(a["project"], {}).get("name", "?")
         roster.append(f"- {a['name']} | platform: {pname} | role: {a['role'] or '-'} | status: {a['status']}"
                       f"\n  latest summary: {(a['summary'] or '(no work yet)')[:600]}".replace("\r", ""))
+    platforms = []
+    for p in sorted(projects.values(), key=lambda x: x["created"]):
+        n = sum(1 for a in agents.values() if a["project"] == p["id"])
+        platforms.append(f"- {p['name']} | id: {p['id']} | agents: {n}")
     label = {"user": "Owner", "director": "Director", "system": "System"}
     convo = "\n".join(f"{label.get(m['role'], 'System')}: {re.sub(r'\s+', ' ', m['text'])[:700]}" for m in chat[-14:])
     extra = f"\n\nExtra instructions from the owner: {d['role']}" if d["role"] else ""
-    return (f"{DIRECTOR_RULES}{extra}\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
+    return (f"{DIRECTOR_RULES}{extra}\n\nPLATFORMS:\n" + ("\n".join(platforms) or "(no platforms yet)") +
+            "\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
             "\n\nCONVERSATION (oldest first):\n" + convo + "\n\nWrite the Director's next message.")
 
 
@@ -570,6 +577,23 @@ def auto_slot():
     return None
 
 
+def find_project(key):
+    """Resolve a platform by id or by name (case-insensitive, surrounding whitespace ignored).
+    Returns (project dict, None) on success, or (None, error message)."""
+    if not key or not str(key).strip():
+        return None, "give a platform name or id"
+    key = str(key).strip()
+    if key in projects:
+        return projects[key], None
+    matches = [p for p in projects.values() if p["name"].strip().lower() == key.lower()]
+    if not matches:
+        return None, f"platform '{key[:40]}' not found"
+    if len(matches) > 1:
+        return None, (f"several platforms are named '{matches[0]['name']}'; give the id instead "
+                      f"({', '.join(p['id'] for p in matches)})")
+    return matches[0], None
+
+
 def dir_create_platform(act):
     name = str(act.get("name", "")).strip()
     if not name:
@@ -590,22 +614,49 @@ def dir_create_agent(act):
         return "Skipped: create_agent needs a 'name'."
     if not platform:
         return f"Skipped: create_agent for '{name}' needs a 'platform' (a platform name or id)."
-    pid = str(platform)
-    if pid not in projects:
-        match = next((x for x in projects if projects[x]["name"].lower() == pid.lower()), None)
-        pid = match
-    if not pid:
-        return (f"Skipped: could not create agent '{name}': platform '{str(platform)[:40]}' not found. "
+    p, err = find_project(str(platform))
+    if not p:
+        return (f"Skipped: could not create agent '{name}': {err}. "
                 "Create it first with create_platform.")
     backend = str(act.get("backend") or "claude").strip() or "claude"
     model = str(act.get("model") or "").strip() or DEFAULT_MODELS.get(backend, "")
     role = str(act.get("role") or "").strip()
     try:
-        agent = create_agent({"name": name, "role": role, "backend": backend, "model": model, "project": pid})
+        agent = create_agent({"name": name, "role": role, "backend": backend, "model": model, "project": p["id"]})
     except ApiError as e:
         return f"Could not create agent '{name}': {e.message}."
-    pname = projects[pid]["name"]
-    return f"Created agent '{agent['name']}' on platform '{pname}' (backend {backend}, role {role or '-'})."
+    return f"Created agent '{agent['name']}' on platform '{p['name']}' (backend {backend}, role {role or '-'})."
+
+
+def dir_delete_platform(act):
+    if not str(act.get("name", "")).strip():
+        return "Skipped: delete_platform needs a 'name' (a platform name or id)."
+    p, err = find_project(act.get("name"))
+    if not p:
+        return f"Could not delete platform '{str(act.get('name'))[:40]}': {err}."
+    try:
+        delete_project(p["id"])
+    except ApiError as e:
+        return f"Could not delete platform '{p['name']}': {e.message}."
+    return f"Deleted platform '{p['name']}'."
+
+
+def dir_delete_agent(act):
+    name = str(act.get("name", "")).strip()
+    if not name:
+        return "Skipped: delete_agent needs a 'name'."
+    target = find_agent(name)
+    if not target:
+        return f"Skipped: no agent named '{name[:40]}'."
+    if target.get("isDirector"):
+        return f"Could not delete agent '{target['name']}': it is the Director. Remove it in the UI if you must."
+    if target["status"] == "working":
+        return f"Could not delete agent '{target['name']}': it is working right now."
+    try:
+        delete_agent(target["id"])
+    except ApiError as e:
+        return f"Could not delete agent '{target['name']}': {e.message}."
+    return f"Deleted agent '{target['name']}'."
 
 
 def run_action(act):
@@ -627,6 +678,10 @@ def run_action(act):
         return dir_create_platform(act)
     if kind == "create_agent":
         return dir_create_agent(act)
+    if kind == "delete_platform":
+        return dir_delete_platform(act)
+    if kind == "delete_agent":
+        return dir_delete_agent(act)
     return "Skipped an unknown action."
 
 
@@ -661,6 +716,9 @@ def create_project(d):
     if not all(isinstance(v, int) and not isinstance(v, bool) and -8 <= v <= 8 for v in (q, r)):
         raise ApiError(400, "Invalid platform position")
     with lock:
+        existing = next((p for p in projects.values() if p["name"].strip().lower() == name.lower()), None)
+        if existing:
+            raise ApiError(400, f"A platform named '{existing['name']}' already exists (id {existing['id']})")
         if len(projects) >= MAX_PROJECTS:
             raise ApiError(400, f"Platform limit ({MAX_PROJECTS}) reached")
         taken = {(p["q"], p["r"]) for p in projects.values()}
@@ -714,7 +772,7 @@ def create_agent(d):
             raise ApiError(400, "Choose a platform for this agent")
         if len(agents) >= MAX_AGENTS:
             raise ApiError(400, f"Agent limit ({MAX_AGENTS}) reached")
-        if find_agent(name):
+        if any(a["name"].strip().lower() == name.lower() for a in agents.values()):
             raise ApiError(400, "An agent with that name already exists")
         aid = uuid.uuid4().hex[:8]
         agent = {"id": aid, "name": name, "role": role, "backend": backend, "model": model, "project": d["project"],
