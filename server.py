@@ -1090,6 +1090,11 @@ NOTES_ROUTE = re.compile(rf"^/api/notes/{ID}$")
 MODELS_ROUTE = re.compile(r"^/api/models/(gemini|openrouter|opencode|opencode-readonly|claude)$")
 
 
+PLATFORMS_DIR = ROOT / "platforms"  # experimental variants / screenshots (platforms/coding/)
+PLATFORM_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".png": "image/png",
+}
 VENDOR_DIR = ROOT / "vendor"
 VENDOR_DIR.mkdir(exist_ok=True)
 VENDOR_TYPES = {
@@ -1179,14 +1184,37 @@ class Handler(BaseHTTPRequestHandler):
         ctype = VENDOR_TYPES.get(target.suffix.lower(), "application/octet-stream")
         self._send(200, target.read_bytes(), ctype)
 
+    def _serve_platforms(self, path):
+        rel = urllib.parse.unquote(path[len("/platforms/"):])
+        if not rel or "\x00" in rel:
+            raise ApiError(404, "Not found")
+        try:
+            target = (PLATFORMS_DIR / rel).resolve()
+            target.relative_to(PLATFORMS_DIR.resolve())
+        except (ValueError, OSError):
+            raise ApiError(403, "Forbidden") from None
+        if not target.is_file():
+            raise ApiError(404, "Not found")
+        ctype = PLATFORM_TYPES.get(target.suffix.lower())
+        if ctype is None:
+            raise ApiError(404, "Not found")
+        self._send(200, target.read_bytes(), ctype)
+
     def _get(self):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/mictest.html":
             self._send(200, (ROOT / "mictest.html").read_bytes(), "text/html; charset=utf-8")
-        elif path in ("/index_3d.html", "/index-daily.html", "/index_style_b.html"):
-            self._send(200, (ROOT / path.lstrip("/")).read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/index_3d", "/index_3d.html", "/index-daily", "/index-daily.html",
+                      "/index_style_a", "/index_style_a.html", "/index_style_b", "/index_style_b.html"):
+            # experimental design variants live in platforms/coding/; both /name and /name.html work
+            name = path.lstrip("/")
+            if not name.endswith(".html"):
+                name += ".html"
+            self._send(200, (PLATFORMS_DIR / "coding" / name).read_bytes(), "text/html; charset=utf-8")
+        elif path.startswith("/platforms/"):
+            self._serve_platforms(path)
         elif path.startswith("/vendor/"):
             self._serve_vendor(path)
         elif path == "/api/state":

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Web Speech API mic diagnostic</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem 0; color: #90caf9; }
+  button { font-size: 1.4rem; padding: 0.8rem 2rem; margin: 0 0.5rem 1rem 0; border: none; border-radius: 8px; cursor: pointer; }
+  #startBtn { background: #2e7d32; color: #fff; }
+  #stopBtn { background: #c62828; color: #fff; }
+  #listBtn { background: #1565c0; color: #fff; }
+  #pegelStartBtn { background: #6a1b9a; color: #fff; }
+  #pegelStopBtn { background: #455a64; color: #fff; }
+  #pegelStopBtn:disabled { opacity: 0.4; cursor: default; }
+  #log, #devList { background: #000; color: #9f9; padding: 0.75rem; border-radius: 8px; white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; }
+  #log { max-height: 70vh; overflow-y: auto; }
+  #devList { max-height: 30vh; overflow-y: auto; margin: 0.5rem 0; }
+  #noAudioWarn { display: none; background: #b71c1c; color: #fff; font-weight: bold; font-size: 1.05rem; padding: 1rem; border-radius: 8px; margin: 0.75rem 0; line-height: 1.4; }
+  #meterBox { margin: 0.5rem 0; }
+  .barOuter { width: 100%; max-width: 720px; height: 28px; background: #222; border: 1px solid #444; border-radius: 6px; overflow: hidden; margin-top: 0.4rem; }
+  #barFill { width: 0%; height: 100%; background: #555; }
+</style>
+</head>
+<body>
+<h1>Web Speech API diagnostic (mictest.html)</h1>
+<button id="startBtn" type="button">Start</button>
+<button id="stopBtn" type="button">Stop</button>
+
+<h2>Eingabegeraete (audioinput)</h2>
+<button id="listBtn" type="button">Geraete auflisten</button>
+<pre id="devList" style="display:none"></pre>
+<div id="noAudioWarn">KEIN AUDIO — Chrome empfaengt Stille von diesem Geraet. Falsches Mikro in chrome://settings/content/microphone oder Geraet stummgeschaltet.</div>
+
+<h2>Live-Eingangspegel</h2>
+<button id="pegelStartBtn" type="button">Pegel starten</button>
+<button id="pegelStopBtn" type="button" disabled>Pegel stoppen</button>
+<div id="meterBox">
+  <div>Pegel: <span id="rmsVal">-</span> / 100 &nbsp;|&nbsp; Maximalpegel: <span id="peakVal">0</span> / 100</div>
+  <div class="barOuter"><div id="barFill"></div></div>
+</div>
+
+<h2>Log</h2>
+<pre id="log"></pre>
+<script>
+"use strict";
+var logEl = document.getElementById("log");
+
+function ts() {
+  var d = new Date();
+  return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function log(msg) {
+  var line = "[" + ts() + "] " + msg;
+  logEl.textContent += line + "\n";
+  console.log(line);
+}
+
+log("--- page load ---");
+log("navigator.onLine = " + navigator.onLine);
+log("window.isSecureContext = " + window.isSecureContext);
+log("location.href = " + location.href);
+log("navigator.userAgent = " + navigator.userAgent);
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+log("SpeechRecognition exists = " + (SR ? (window.SpeechRecognition ? "SpeechRecognition" : "webkitSpeechRecognition") : "NO"));
+
+function makeRecognition() {
+  var r = new SR();
+  r.continuous = true;
+  r.interimResults = true;
+  r.onstart = function () { log("onstart"); };
+  r.onaudiostart = function () { log("onaudiostart"); };
+  r.onsoundstart = function () { log("onsoundstart"); };
+  r.onspeechstart = function () { log("onspeechstart"); };
+  r.onspeechend = function () { log("onspeechend"); };
+  r.onsoundend = function () { log("onsoundend"); };
+  r.onaudioend = function () { log("onaudioend"); };
+  r.onresult = function (event) {
+    log("onresult resultIndex=" + event.resultIndex + " results.length=" + event.results.length);
+    for (var i = 0; i < event.results.length; i++) {
+      var res = event.results[i];
+      log("  result[" + i + "] isFinal=" + res.isFinal + " transcript=" + JSON.stringify(res[0] ? res[0].transcript : ""));
+    }
+  };
+  r.onnomatch = function () { log("onnomatch"); };
+  r.onerror = function (event) {
+    log("onerror error=" + JSON.stringify(event.error) + " message=" + JSON.stringify(event.message));
+  };
+  r.onend = function () { log("onend"); };
+  return r;
+}
+
+var recognition = null;
+
+document.getElementById("startBtn").addEventListener("click", function () {
+  log("Start clicked");
+  if (!SR) { log("Cannot start: SpeechRecognition unavailable"); return; }
+  recognition = makeRecognition();
+  try {
+    recognition.start();
+    log("recognition.start() called without throwing");
+  } catch (err) {
+    log("recognition.start() THREW: " + (err && err.name ? err.name + ": " + err.message : String(err)));
+  }
+});
+
+document.getElementById("stopBtn").addEventListener("click", function () {
+  log("Stop clicked");
+  if (!recognition) { log("No active recognition instance"); return; }
+  try {
+    recognition.stop();
+    log("recognition.stop() called");
+  } catch (err) {
+    log("recognition.stop() THREW: " + (err && err.name ? err.name + ": " + err.message : String(err)));
+  }
+});
+
+// ---------- shared getUserMedia stream ----------
+var mediaStream = null;
+
+function streamIsLive(s) {
+  if (!s) return false;
+  var tracks = s.getTracks ? s.getTracks() : [];
+  for (var i = 0; i < tracks.length; i++) { if (tracks[i].readyState === "live") return true; }
+  return false;
+}
+
+function ensureStream() {
+  if (streamIsLive(mediaStream)) return Promise.resolve(mediaStream);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return Promise.reject(new Error("navigator.mediaDevices.getUserMedia nicht verfuegbar"));
+  }
+  log("getUserMedia({audio:true}) angefragt ...");
+  return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+    mediaStream = s;
+    var track = s.getAudioTracks()[0];
+    var st = track && track.getSettings ? track.getSettings() : {};
+    log("getUserMedia OK: label=" + JSON.stringify(track ? track.label : "") +
+        " deviceId=" + JSON.stringify(st.deviceId) +
+        " echoCancellation=" + st.echoCancellation +
+        " autoGainControl=" + st.autoGainControl +
+        " noiseSuppression=" + st.noiseSuppression);
+    return s;
+  }, function (err) {
+    log("getUserMedia FEHLER: " + err.name + ": " + err.message);
+    throw err;
+  });
+}
+
+function releaseStream() {
+  if (!mediaStream) return;
+  var tracks = mediaStream.getTracks();
+  for (var i = 0; i < tracks.length; i++) { try { tracks[i].stop(); } catch (e) {} }
+  mediaStream = null;
+  log("getUserMedia-Stream freigegeben (Mikrofon-LED sollte ausgehen)");
+}
+
+// ---------- device listing ----------
+function truncId(id) {
+  if (!id) return "(leer)";
+  return id.length > 14 ? id.slice(0, 10) + "..." + id.slice(-4) : id;
+}
+
+document.getElementById("listBtn").addEventListener("click", function () {
+  log("Geraete auflisten geklickt");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    log("enumerateDevices NICHT verfuegbar");
+    return;
+  }
+  ensureStream().then(function () {
+    return navigator.mediaDevices.enumerateDevices();
+  }).then(function (devices) {
+    renderDeviceList(devices);
+  }).catch(function () { /* already logged */ });
+});
+
+function renderDeviceList(devices) {
+  var inputs = [];
+  for (var i = 0; i < devices.length; i++) { if (devices[i].kind === "audioinput") inputs.push(devices[i]); }
+  log("Geraeteliste: " + devices.length + " Geraete gesamt, davon " + inputs.length + " audioinput");
+  var defaultGroup = "";
+  var commGroup = "";
+  for (var j = 0; j < inputs.length; j++) {
+    if (inputs[j].deviceId === "default") defaultGroup = inputs[j].groupId;
+    if (inputs[j].deviceId === "communications") commGroup = inputs[j].groupId;
+  }
+  var lines = [];
+  for (var k = 0; k < inputs.length; k++) {
+    var d = inputs[k];
+    var tags = [];
+    if (d.deviceId === "default" || (defaultGroup && d.groupId === defaultGroup)) tags.push("DEFAULT (Chrome Standard)");
+    if (d.deviceId === "communications" || (commGroup && d.groupId === commGroup)) tags.push("DEFAULT-COMM");
+    if (!d.label) tags.push("kein Label");
+    var line = "#" + (k + 1) + (tags.length ? " [" + tags.join(" | ") + "]" : "") +
+      " label=" + JSON.stringify(d.label || "(unbekannt)") +
+      "  deviceId=" + truncId(d.deviceId) +
+      "  groupId=" + truncId(d.groupId);
+    lines.push(line);
+    log("audioinput " + line);
+  }
+  if (!inputs.length) { lines.push("KEINE audioinput-Geraete gefunden"); log(lines[0]); }
+  var devEl = document.getElementById("devList");
+  devEl.textContent = lines.join("\n");
+  devEl.style.display = "block";
+}
+
+// ---------- live level meter ----------
+var audioCtx = null;
+var analyser = null;
+var timeBuf = null;
+var rafId = 0;
+var levelRunning = false;
+var maxLevel = 0;
+var silenceTimer = 0;
+var warnShown = false;
+
+function setBar(lvl) {
+  var fill = document.getElementById("barFill");
+  fill.style.width = lvl + "%";
+  fill.style.background = lvl < 2 ? "#555" : (lvl < 40 ? "#43a047" : (lvl < 75 ? "#f9a825" : "#e53935"));
+}
+
+function levelLoop() {
+  if (!levelRunning) return;
+  rafId = requestAnimationFrame(levelLoop);
+  analyser.getFloatTimeDomainData(timeBuf);
+  var sum = 0;
+  for (var i = 0; i < timeBuf.length; i++) { var v = timeBuf[i]; sum += v * v; }
+  var rms = Math.sqrt(sum / timeBuf.length);
+  var lvl = Math.min(100, Math.round(rms * 300));
+  document.getElementById("rmsVal").textContent = lvl + " (rms=" + rms.toFixed(4) + ")";
+  if (lvl > maxLevel) {
+    maxLevel = lvl;
+    document.getElementById("peakVal").textContent = String(maxLevel);
+  }
+  setBar(lvl);
+  if (warnShown && maxLevel >= 1) {
+    warnShown = false;
+    document.getElementById("noAudioWarn").style.display = "none";
+    log("Audio empfangen (Pegel=" + lvl + "), Stille-Warnung zurueckgezogen");
+  }
+}
+
+function teardownMeter() {
+  if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = 0; }
+  levelRunning = false;
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  analyser = null;
+  timeBuf = null;
+  document.getElementById("pegelStartBtn").disabled = false;
+  document.getElementById("pegelStopBtn").disabled = true;
+}
+
+document.getElementById("pegelStartBtn").addEventListener("click", function () {
+  log("Pegel starten geklickt");
+  if (levelRunning) { log("Pegel-Messung laeuft bereits"); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { log("getUserMedia NICHT verfuegbar"); return; }
+  ensureStream().then(function (s) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { log("AudioContext NICHT verfuegbar"); return; }
+    audioCtx = new AC();
+    var resumePromise = (audioCtx.state === "suspended" && audioCtx.resume) ? audioCtx.resume() : Promise.resolve();
+    return resumePromise.then(function () {
+      var src = audioCtx.createMediaStreamSource(s);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      timeBuf = new Float32Array(analyser.fftSize);
+      maxLevel = 0;
+      warnShown = false;
+      levelRunning = true;
+      document.getElementById("noAudioWarn").style.display = "none";
+      document.getElementById("peakVal").textContent = "0";
+      setBar(0);
+      document.getElementById("pegelStartBtn").disabled = true;
+      document.getElementById("pegelStopBtn").disabled = false;
+      log("Pegel-Messung GESTARTET (sampleRate=" + audioCtx.sampleRate + ", fftSize=" + analyser.fftSize + "). Bitte normal sprechen.");
+      silenceTimer = window.setTimeout(function () {
+        if (levelRunning && maxLevel < 1) {
+          warnShown = true;
+          document.getElementById("noAudioWarn").style.display = "block";
+          log("WARNUNG: Maximalpegel nach 5 s bei ~0 -> KEIN AUDIO");
+        }
+      }, 5000);
+      levelLoop();
+    });
+  }).catch(function (err) {
+    if (err && err.name) log("Pegel-Start FEHLER: " + err.name + ": " + err.message);
+    teardownMeter();
+  });
+});
+
+document.getElementById("pegelStopBtn").addEventListener("click", function () {
+  log("Pegel stoppen geklickt");
+  if (!levelRunning && !audioCtx) { log("Pegel-Messung laeuft nicht"); return; }
+  var finalMax = maxLevel;
+  teardownMeter();
+  releaseStream();
+  setBar(0);
+  document.getElementById("rmsVal").textContent = "-";
+  log("Pegel-Messung GESTOPPT. Maximalpegel=" + finalMax + "/100" +
+      (finalMax < 1 ? "  => es kam praktisch KEIN Schall an" : "  => Schall kam an"));
+});
+</script>
+</body>
+</html>
