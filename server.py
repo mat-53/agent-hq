@@ -1,10 +1,13 @@
 ﻿#!/usr/bin/env python3
 """Agent HQ: local server for a small company of AI agents grouped into project platforms."""
+import argparse
 import json
 import os
 import queue
 import random
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -26,10 +29,84 @@ WORKSPACES = ROOT / "workspaces"
 HOST, PORT = "127.0.0.1", int(os.environ.get("AGENT_HQ_PORT") or 8765)
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
-MAX_BODY, MAX_OUTPUT, MAX_HISTORY = 100_000, 20_000, 10
+MAX_OUTPUT, MAX_HISTORY = 20_000, 10
 MAX_AGENTS, MAX_PROJECTS, MAX_CHAT, MAX_AUTO_ROUNDS = 40, 12, 200, 4
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\-]{1,100}$")
-PROVIDER_TIMEOUT, OPENCODE_TIMEOUT, CLAUDE_TIMEOUT = 120, 900, 300
+
+
+def _get_int(name, default, minimum=1):
+    """Read a positive integer env var; unset / invalid / below `minimum` -> default."""
+    try:
+        v = int(float(str(os.environ.get(name, "")).strip()))
+    except (TypeError, ValueError):
+        return default
+    return v if v >= minimum else default
+
+
+# Max characters of one user message (chat box and direct agent tasks). Env: MAX_MESSAGE_CHARS (default 32000).
+MAX_MESSAGE_CHARS = _get_int("MAX_MESSAGE_CHARS", 32_000)
+# Max HTTP request body in bytes. Derived from MAX_MESSAGE_CHARS so a full-size message can never hit it
+# (worst case JSON-escaped: 6 bytes/char); never below the old 100_000.
+MAX_BODY = max(100_000, MAX_MESSAGE_CHARS * 8)
+# CreateProcess limit on Windows is 32767 chars; OpenCode gets its prompt as an argument (see run_opencode).
+WIN_CMDLINE_LIMIT = 32_000
+
+
+def _parse_timeout(raw, default):
+    """Parse a timeout env value. None/unset -> default; '' or 0 -> None (no timeout)."""
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if s == "":
+        return None
+    try:
+        v = int(float(s))
+    except (TypeError, ValueError):
+        return default
+    if v <= 0:
+        return None
+    return v
+
+
+def _get_timeout(name, default):
+    return _parse_timeout(os.environ.get(name), default)
+
+
+def _fmt_timeout(timeout):
+    if timeout is None:
+        return "ohne Zeitlimit"
+    if timeout >= 60 and timeout % 60 == 0:
+        return f"{timeout} s ({timeout // 60} Minuten)"
+    return f"{timeout} s"
+
+
+class TimeoutPartial(RuntimeError):
+    """A timeout that still carries usable partial output (saved by worker())."""
+    def __init__(self, message, partial=""):
+        super().__init__(message)
+        self.partial = partial
+
+
+PROVIDER_TIMEOUT = _get_timeout("PROVIDER_TIMEOUT", 600)
+OPENCODE_TIMEOUT = _get_timeout("OPENCODE_TIMEOUT", 3600)
+CLAUDE_TIMEOUT = _get_timeout("CLAUDE_TIMEOUT", 3600)
+
+
+def refresh_timeouts():
+    """Re-read timeouts from the environment (called after load_env() in main())."""
+    global PROVIDER_TIMEOUT, OPENCODE_TIMEOUT, CLAUDE_TIMEOUT
+    PROVIDER_TIMEOUT = _get_timeout("PROVIDER_TIMEOUT", 600)
+    OPENCODE_TIMEOUT = _get_timeout("OPENCODE_TIMEOUT", 3600)
+    CLAUDE_TIMEOUT = _get_timeout("CLAUDE_TIMEOUT", 3600)
+
+
+def refresh_limits():
+    """Re-read MAX_MESSAGE_CHARS after load_env() (the .env file is read after import) and re-derive MAX_BODY."""
+    global MAX_MESSAGE_CHARS, MAX_BODY
+    MAX_MESSAGE_CHARS = _get_int("MAX_MESSAGE_CHARS", 32_000)
+    MAX_BODY = max(100_000, MAX_MESSAGE_CHARS * 8)
+
+
 SECRET_ENV = ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 CLAUDE_MODELS = ("opus", "sonnet", "haiku")
 NEIGHBORS = ((1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1))
@@ -132,7 +209,7 @@ def snapshot():
     with lock:
         return {"projects": sorted(projects.values(), key=lambda p: p["created"]),
                 "agents": sorted(agents.values(), key=lambda a: a["created"]),
-                "backends": backend_info(), "chat": chat[-80:], "busy": director_busy,
+                "backends": backend_info(), "chat": chat[-80:], "busy": director_busy, "maxMessageChars": MAX_MESSAGE_CHARS,
                 "autoReview": settings["autoReview"], "director": (current_director() or {}).get("id")}
 
 
@@ -194,7 +271,8 @@ def broadcast():
 
 
 def add_chat(role, text):
-    chat.append({"role": role, "text": text[:4000], "ts": time.time()})
+    # user text is already length-checked in send_chat (never cut here); Director/system text keeps the 4000 cap
+    chat.append({"role": role, "text": text if role == "user" else text[:4000], "ts": time.time()})
     del chat[:-MAX_CHAT]
 
 
@@ -211,10 +289,24 @@ def write_notes(a):
     (NOTES_DIR / a["notesFile"]).write_text("\n".join(parts), encoding="utf-8")
 
 
+def _smart_truncate(text, limit):
+    """Cut text to at most `limit` chars, preferring a sentence/line boundary over mid-word."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for sep in ("\n", ". ", "! ", "? ", "; ", " "):
+        idx = cut.rfind(sep)
+        if idx >= limit * 0.5:
+            # keep sentence-ending punctuation, never cut mid-word
+            return cut[:idx + 1].rstrip() if sep != "\n" else cut[:idx].rstrip()
+    return cut.rstrip()
+
+
 def extract_summary(text):
     idx = text.upper().rfind("SUMMARY:")
     body = text[idx + 8:] if idx != -1 else text
-    return body.strip()[:1200] if idx != -1 else body.strip()[:500]
+    return _smart_truncate(body, 6000) if idx != -1 else _smart_truncate(body, 3000)
 
 
 # ---------- worker backends ----------
@@ -224,7 +316,8 @@ def http_json(url, headers, body=None):
         url, data=None if body is None else json.dumps(body).encode("utf-8"),
         method="GET" if body is None else "POST", headers={"Content-Type": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=PROVIDER_TIMEOUT) as resp:
+        timeout = _get_timeout("PROVIDER_TIMEOUT", PROVIDER_TIMEOUT)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code} from provider: {e.read().decode('utf-8', 'replace')[:500]}") from None
@@ -303,16 +396,52 @@ def run_claude(agent, task):
     cmd = [exe, "-p", "--model", agent["model"], "--tools", "default", "--strict-mcp-config", "--no-session-persistence",
            "--setting-sources", "project", "--disable-slash-commands", "--dangerously-skip-permissions",
            "--system-prompt", system]
+    timeout = _get_timeout("CLAUDE_TIMEOUT", CLAUDE_TIMEOUT)
     try:
         proc = subprocess.run(cmd, input=task, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=CLAUDE_TIMEOUT, cwd=str(cwd), env=clean_env(),
+                              timeout=timeout, cwd=str(cwd), env=clean_env(),
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"The claude CLI took longer than {CLAUDE_TIMEOUT // 60} minutes and was stopped.") from None
+    except subprocess.TimeoutExpired as e:
+        partial = str(e.stdout or "").strip()
+        if not partial and e.stderr:
+            partial = str(e.stderr or "").strip()[-2000:]
+        raise TimeoutPartial(
+            f"Der claude CLI wurde abgebrochen nach {_fmt_timeout(timeout)}, Teilergebnis erhalten.",
+            partial) from None
     out = proc.stdout.strip()
     if proc.returncode != 0 or not out:
         raise RuntimeError("Claude CLI failed: " + ((out or proc.stderr).strip()[-400:] or f"exit code {proc.returncode}"))
     return out
+
+
+def _partial_opencode_output(stdout_text, ws, agent_id):
+    """Best-effort parse of (possibly truncated) OpenCode JSON-lines into readable text."""
+    texts, files, shell_runs = [], [], 0
+    for line in stdout_text.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind, part = ev.get("type"), ev.get("part") or {}
+        if kind == "text" and part.get("text"):
+            texts.append(part["text"])
+        elif kind == "tool_use":
+            tool, inp = part.get("tool"), (part.get("state") or {}).get("input") or {}
+            if tool == "bash":
+                shell_runs += 1
+            elif tool in ("write", "edit", "patch") and inp.get("filePath"):
+                try:
+                    name = str(Path(inp["filePath"]).resolve().relative_to(ws.resolve()))
+                except ValueError:
+                    name = inp["filePath"]
+                if name not in files:
+                    files.append(name)
+    out = "\n\n".join(texts).strip()
+    if files:
+        out += ("\n\n" if out else "") + "Files written in workspaces/" + agent_id + ":\n" + "\n".join("- " + f for f in files)
+    if shell_runs:
+        out += f"\n\n(ran {shell_runs} shell command{'s' if shell_runs > 1 else ''})"
+    return out.strip()
 
 
 def run_opencode(agent, task, readonly=False):
@@ -328,12 +457,24 @@ def run_opencode(agent, task, readonly=False):
     if readonly:
         cmd += ["--agent", "plan"]
     cmd.append(prompt)
+    if os.name == "nt" and len(subprocess.list2cmdline(cmd)) > WIN_CMDLINE_LIMIT:
+        # OpenCode takes the prompt as a command-line argument; Windows cuts / rejects >32767 chars.
+        # Fail loudly instead of silently dropping part of the message.
+        raise RuntimeError(
+            f"The prompt is too long for OpenCode on Windows ({len(prompt)} characters; the command line allows about "
+            f"{WIN_CMDLINE_LIMIT}). Shorten the message, or use a Claude, Gemini or OpenRouter agent for long input.")
+    timeout = _get_timeout("OPENCODE_TIMEOUT", OPENCODE_TIMEOUT)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=OPENCODE_TIMEOUT, stdin=subprocess.DEVNULL, env=clean_env(),
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=clean_env(),
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"OpenCode took longer than {OPENCODE_TIMEOUT // 60} minutes and was stopped.") from None
+    except subprocess.TimeoutExpired as e:
+        partial_out = _partial_opencode_output(str(e.stdout or ""), ws, agent["id"])
+        if not partial_out and e.stderr:
+            partial_out = str(e.stderr or "").strip()[-2000:]
+        raise TimeoutPartial(
+            f"OpenCode wurde abgebrochen nach {_fmt_timeout(timeout)}, Teilergebnis erhalten.",
+            partial_out or "(abgebrochen, kein Teilergebnis vorhanden)") from None
     texts, files, shell_runs, errors = [], [], 0, []
     for line in proc.stdout.splitlines():
         try:
@@ -461,6 +602,8 @@ def worker(agent_id, snap, task, prompt):
         if not output.strip():
             raise RuntimeError("The model returned an empty response.")
         status, error = "done", ""
+    except TimeoutPartial as e:
+        output, status, error = (e.partial or ""), "failed", str(e)
     except Exception as e:
         output, status, error = "", "failed", str(e)
     directed = False
@@ -506,7 +649,9 @@ def build_director_prompt(d):
         n = sum(1 for a in agents.values() if a["project"] == p["id"])
         platforms.append(f"- {p['name']} | id: {p['id']} | agents: {n}")
     label = {"user": "Owner", "director": "Director", "system": "System"}
-    convo = "\n".join(f"{label.get(m['role'], 'System')}: {re.sub(r'\s+', ' ', m['text'])[:700]}" for m in chat[-14:])
+    # Owner messages go to the Director in full (they were clipped to 700 chars before); other roles stay clipped.
+    convo = "\n".join(f"{label.get(m['role'], 'System')}: "
+                      f"{re.sub(r'\s+', ' ', m['text'])[:None if m['role'] == 'user' else 700]}" for m in chat[-14:])
     extra = f"\n\nExtra instructions from the owner: {d['role']}" if d["role"] else ""
     return (f"{DIRECTOR_RULES}{extra}\n\nPLATFORMS:\n" + ("\n".join(platforms) or "(no platforms yet)") +
             "\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
@@ -699,7 +844,7 @@ def run_action(act):
         if not isinstance(task, str) or not task.strip():
             return f"Skipped: empty task for {target['name']}."
         try:
-            begin_task(target, task.strip()[:4000], by="director", names=act.get("include_notes_from") or [])
+            begin_task(target, task.strip()[:MAX_MESSAGE_CHARS], by="director", names=act.get("include_notes_from") or [])
         except ApiError as e:
             return f"Could not assign to {target['name']}: {e.message}."
         return f"Assigned to {target['name']}: {task.strip()[:160]}"
@@ -846,8 +991,8 @@ def start_task(agent_id, d):
     task = str(d.get("task", "")).strip() if isinstance(d, dict) else ""
     if not task:
         raise ApiError(400, "Task is empty")
-    if len(task) > 10_000:
-        raise ApiError(400, "Task is too long (max 10000 characters)")
+    if len(task) > MAX_MESSAGE_CHARS:
+        raise ApiError(400, f"Task is too long ({len(task)} characters, max {MAX_MESSAGE_CHARS})")
     with lock:
         a = agents.get(agent_id)
         if not a:
@@ -907,8 +1052,8 @@ def send_chat(d):
     text = str(d.get("text", "")).strip() if isinstance(d, dict) else ""
     if not text:
         raise ApiError(400, "Message is empty")
-    if len(text) > 4000:
-        raise ApiError(400, "Message is too long (max 4000 characters)")
+    if len(text) > MAX_MESSAGE_CHARS:
+        raise ApiError(400, f"Message is too long ({len(text)} characters, max {MAX_MESSAGE_CHARS})")
     with lock:
         if not current_director():
             raise ApiError(400, "Make one agent the Director first")
@@ -943,6 +1088,23 @@ PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
 PROJ_MOV_ROUTE = re.compile(rf"^/api/projects/{ID}/move$")
 NOTES_ROUTE = re.compile(rf"^/api/notes/{ID}$")
 MODELS_ROUTE = re.compile(r"^/api/models/(gemini|openrouter|opencode|opencode-readonly|claude)$")
+
+
+VENDOR_DIR = ROOT / "vendor"
+VENDOR_DIR.mkdir(exist_ok=True)
+VENDOR_TYPES = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".glb": "model/gltf-binary",
+    ".gltf": "model/gltf+json",
+    ".svg": "image/svg+xml",
+    ".wasm": "application/wasm",
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1003,10 +1165,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch(self._delete, True)
 
+    def _serve_vendor(self, path):
+        rel = urllib.parse.unquote(path[len("/vendor/"):])
+        if not rel or "\x00" in rel:
+            raise ApiError(404, "Not found")
+        try:
+            target = (VENDOR_DIR / rel).resolve()
+            target.relative_to(VENDOR_DIR.resolve())
+        except (ValueError, OSError):
+            raise ApiError(403, "Forbidden") from None
+        if not target.is_file():
+            raise ApiError(404, "Not found")
+        ctype = VENDOR_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        self._send(200, target.read_bytes(), ctype)
+
     def _get(self):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/mictest.html":
+            self._send(200, (ROOT / "mictest.html").read_bytes(), "text/html; charset=utf-8")
+        elif path in ("/index_3d.html", "/index-daily.html", "/index_style_b.html"):
+            self._send(200, (ROOT / path.lstrip("/")).read_bytes(), "text/html; charset=utf-8")
+        elif path.startswith("/vendor/"):
+            self._serve_vendor(path)
         elif path == "/api/state":
             self._json(200, snapshot())
         elif path == "/api/events":
@@ -1088,12 +1270,111 @@ class Handler(BaseHTTPRequestHandler):
                     clients.remove(q)
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Agent HQ server. Plain HTTP by default; "
+                                            "--https enables HTTPS so LAN addresses become a secure context "
+                                            "(needed for the microphone / Web Speech API).")
+    p.add_argument("--https", action="store_true", help="serve over HTTPS instead of plain HTTP")
+    p.add_argument("--certfile", help="TLS certificate PEM file (default: certs/cert.pem next to server.py)")
+    p.add_argument("--keyfile", help="TLS private key PEM file (default: certs/key.pem next to server.py)")
+    return p.parse_args()
+
+
+def lan_ips():
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    return sorted(ips)
+
+
+def ensure_tls_cert(certfile, keyfile, lan):
+    """Return (cert, key) paths. Without --certfile/--keyfile, reuse or generate a self-signed
+    pair in certs/ next to server.py; generation needs the optional 'cryptography' package."""
+    if bool(certfile) != bool(keyfile):
+        sys.exit("Error: --certfile and --keyfile must be given together.")
+    certs = ROOT / "certs"
+    cert = Path(certfile) if certfile else certs / "cert.pem"
+    key = Path(keyfile) if keyfile else certs / "key.pem"
+    if cert.exists() and key.exists():
+        return cert, key
+    extra = "".join(f",IP:{ip}" for ip in lan)
+    try:
+        import datetime
+        import ipaddress
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        sys.exit(
+            "HTTPS needs a TLS certificate, and the optional 'cryptography' package is not installed.\n"
+            "Either install it and restart:\n"
+            "    pip install cryptography\n"
+            "or create the certificate yourself with openssl, then start the server again with --https:\n\n"
+            f'    openssl req -x509 -newkey rsa:2048 -sha256 -days 825 -nodes -keyout "{key}" '
+            f'-out "{cert}" -subj "/CN=agent-hq" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1{extra}"')
+    now = datetime.datetime.now(datetime.timezone.utc)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "agent-hq")])
+    sans = [x509.DNSName("localhost"), x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
+    sans += [x509.IPAddress(ipaddress.IPv4Address(ip)) for ip in lan]
+    k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    c = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(k.public_key())
+         .serial_number(x509.random_serial_number())
+         .not_valid_before(now - datetime.timedelta(minutes=5))
+         .not_valid_after(now + datetime.timedelta(days=825))
+         .add_extension(x509.SubjectAlternativeName(sans), critical=False)
+         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=False)
+         .sign(k, hashes.SHA256()))
+    cert.parent.mkdir(parents=True, exist_ok=True)
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_bytes(k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                    serialization.NoEncryption()))
+    cert.write_bytes(c.public_bytes(serialization.Encoding.PEM))
+    return cert, key
+
+
 def main():
+    args = parse_args()
     load_env()
+    refresh_timeouts()
+    refresh_limits()
     load()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    server.daemon_threads = True
-    print(f"Agent HQ running at http://{HOST}:{PORT}  (Ctrl+C to stop)")
+    if not args.https:
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
+        server.daemon_threads = True
+        print(f"Agent HQ running at http://{HOST}:{PORT}  (Ctrl+C to stop)")
+    else:
+        global ALLOWED_HOSTS, ALLOWED_ORIGINS
+        lan = lan_ips()
+        hosts = ("localhost", "127.0.0.1", *lan)
+        ALLOWED_HOSTS = {f"{h}:{PORT}" for h in hosts}
+        ALLOWED_ORIGINS = {f"https://{h}:{PORT}" for h in hosts}
+        cert, key = ensure_tls_cert(args.certfile, args.keyfile, lan)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            ctx.load_cert_chain(cert, key)
+        except (ssl.SSLError, OSError) as e:
+            sys.exit(f"Error: could not load the TLS certificate '{cert}' / key '{key}': {e}")
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        server.daemon_threads = True
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        print(f"Agent HQ running at https://127.0.0.1:{PORT}  (Ctrl+C to stop, self-signed certificate)")
+        for ip in lan:
+            print(f"  also at https://{ip}:{PORT}  (accept the browser certificate warning once)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
