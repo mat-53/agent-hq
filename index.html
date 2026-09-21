@@ -61,7 +61,7 @@ body.panel-open #chat{right:auto}
 .msg.system{align-self:stretch;max-width:100%;color:var(--mut);font-size:13.5px;line-height:1.55;background:none;padding:1px 4px}
 .chatbar{display:flex;gap:8px;background:var(--chatbarBg);border:1px solid var(--line);border-radius:12px;padding:8px}
 .chatbar{align-items:flex-end}
-.chatbar #chatIn{flex:1;min-width:0;width:auto;resize:none;height:170px;min-height:170px;font-size:15.5px;line-height:1.5;padding:10px 12px;overflow-y:hidden;white-space:pre-wrap}
+.chatbar #chatIn{flex:1;min-width:0;width:auto;resize:none;height:170px;min-height:170px;font-size:15.5px;line-height:1.5;padding:10px 12px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line) transparent;white-space:pre-wrap}
 #chatInHandle{align-self:stretch;height:12px;margin:-4px 0 -4px;cursor:ns-resize;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px}
 #chatInHandle::before{content:"";width:44px;height:4px;border-radius:2px;background:var(--line)}
 #chatInHandle:hover,#chatInHandle.active{background:var(--handleHov)}
@@ -95,6 +95,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:var(--inputBg
 .pill.done{background:var(--pillDoneBg);color:var(--ok)}
 .pill.failed{background:var(--pillFailBg);color:var(--pillFailTxt)}
 .pill.director{background:var(--pillDirBg);color:var(--pillDirTxt);margin-left:6px}
+#pAck{width:auto;padding:1px 9px;border-radius:99px;font-size:12px;line-height:1.5;margin-left:-4px}
+#lastBox{display:flex;align-items:flex-start;gap:6px}
+#lastTog{flex:0 0 auto;width:auto;padding:0 8px;line-height:1.6;font-size:13px}
+#pLastTask{flex:1;min-width:0;margin:0;white-space:pre-wrap;word-break:break-word;cursor:pointer;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+#lastBox.open #pLastTask{display:block;max-height:40vh;overflow-y:auto}
 details summary{cursor:pointer;color:var(--mut)}
 #pHist details{margin:6px 0}
 #pHist summary{color:var(--txt)}
@@ -148,7 +153,7 @@ details summary{cursor:pointer;color:var(--mut)}
       <div><h2 id="pName"></h2><div id="pMeta" class="mut"></div></div>
       <button id="pClose" aria-label="Close panel">✕</button>
     </header>
-    <div class="row"><div id="pStatus" class="pill"></div><span id="pDirTag" class="pill director" hidden>Director</span></div>
+    <div class="row"><div id="pStatus" class="pill"></div><button id="pAck" hidden title="Dismiss the error badge (the task and result stay)" aria-label="Dismiss error badge">✕ OK</button><span id="pDirTag" class="pill director" hidden>Director</span></div>
     <details><summary>Role / instructions</summary><pre id="pRole"></pre></details>
     <div id="taskBox" class="view">
       <label for="pTask">Assign a task</label>
@@ -156,7 +161,7 @@ details summary{cursor:pointer;color:var(--mut)}
       <div class="row"><button id="pRun" class="primary">Run task</button><span class="mut">Ctrl+Enter</span></div>
     </div>
     <p id="dirNote" class="mut" hidden>This is the Director. Talk to it in the chat bar at the bottom.</p>
-    <p id="pLastTask" class="mut" hidden></p>
+    <div id="lastBox" hidden><button id="lastTog" aria-expanded="false" aria-controls="pLastTask" title="Show or hide the full latest task">▸</button><div id="pLastTask" class="mut"></div></div>
     <div id="mvBox" class="view">
       <h3>Move to another platform</h3>
       <div class="row"><select id="pMove" aria-label="Platform to move this agent to"></select><button id="pMoveBtn">Move</button></div>
@@ -389,10 +394,11 @@ function drawGhost(q, r, t, hov) {
 }
 
 // ---------- "done" visual timeout ----------
-// A finished (done) agent shows the green check + wave for DONE_VISUAL_MS, then looks idle again.
-// 'failed' never times out (it stays until the agent gets new work). The start time is the server's
-// finishedAt, so re-renders/polls/reloads never restart the timer and a new run gets a fresh one.
-const DONE_VISUAL_MS = 30000;
+// A finished (done) agent shows the green check + wave for DONE_VISUAL_MS (2 min), then looks idle again.
+// The result / latest-task text is never affected - only the status symbol (canvas badge, panel pill, list label).
+// 'failed' never times out, but the user can dismiss its badge (see failedAck below). The start time is the server's
+// finishedAt, so re-renders/polls/reloads never restart the timer (an older 'done' is never shown) and a new run gets a fresh one.
+const DONE_VISUAL_MS = 120000;
 let clockSkewMs = 0; // server clock minus browser clock, from the HTTP Date header (ignored when small)
 fetch('/api/state', { cache: 'no-store' }).then(r => {
   const d = Date.parse(r.headers.get('Date') || '');
@@ -411,8 +417,25 @@ function doneStartMs(a) { // browser-clock ms when this agent's current 'done' b
   doneSeen[a.id] = { sig, at: Date.now() }; saveDoneSeen();
   return doneSeen[a.id].at;
 }
-function visualStatus(a) { // the status to draw: an expired 'done' looks idle, everything else is unchanged
-  return a.status === 'done' && Date.now() - doneStartMs(a) >= DONE_VISUAL_MS ? 'idle' : a.status;
+// Dismissed error badges: agent id -> key of the failed run that was acknowledged (name + finish time of that run).
+// A new task that fails again has a different finishedAt -> different key -> the badge shows again.
+const FAILED_ACK_KEY = 'failedAck';
+let failedAck = {};
+try { failedAck = JSON.parse(localStorage.getItem(FAILED_ACK_KEY)) || {}; } catch (e) { failedAck = {}; }
+function saveFailedAck() { try { localStorage.setItem(FAILED_ACK_KEY, JSON.stringify(failedAck)); } catch (e) { /* ignore */ } }
+const failKey = a => a.name + '|' + (a.finishedAt || a.startedAt || 0) + '|' + (a.finishedAt || a.startedAt ? '' : (a.task || ''));
+const failDismissed = a => a.status === 'failed' && failedAck[a.id] === failKey(a);
+function visualStatus(a) { // the status to draw: an expired 'done' / dismissed 'failed' looks idle, everything else is unchanged
+  if (a.status === 'done' && Date.now() - doneStartMs(a) >= DONE_VISUAL_MS) return 'idle';
+  return failDismissed(a) ? 'idle' : a.status;
+}
+function pruneFailedAck(agents) { // forget acknowledgements of agents that are gone or no longer failed
+  let changed = false;
+  for (const id of Object.keys(failedAck)) {
+    const a = agents.find(x => x.id === id);
+    if (!a || a.status !== 'failed') { delete failedAck[id]; changed = true; }
+  }
+  if (changed) saveFailedAck();
 }
 function pruneDoneSeen(agents) { // drop fallback records for agents that are gone or no longer done
   let changed = false;
@@ -567,7 +590,7 @@ function drawProject(p, t) {
       if (a.status === 'working') {
         an.emit = 0.07;
         emit({ x: dx + (Math.random() - 0.5) * 10, y: dy - 34, vx: (Math.random() - 0.5) * 80, vy: -40 - Math.random() * 40, g: 160, life: 0.5, max: 0.5, size: 2.4, color: Math.random() > 0.5 ? '#ffd45a' : '#ff9a3c' });
-      } else if (a.status === 'failed') {
+      } else if (visualStatus(a) === 'failed') {
         an.emit = 0.25;
         emit({ x: pos.x + an.pos.x + (Math.random() - 0.5) * 6, y: pos.y - lift + an.pos.y - 62, vx: (Math.random() - 0.5) * 10, vy: -22, g: 0, life: 1.2, max: 1.2, size: 5, color: '#777', smoke: true });
       }
@@ -666,7 +689,7 @@ function onState(s) {
   }
   for (const id of [...anim.keys()]) if (!ids.has(id)) anim.delete(id);
   state = s;
-  pruneDoneSeen(s.agents);
+  pruneDoneSeen(s.agents); pruneFailedAck(s.agents);
   const w = s.agents.filter(a => a.status === 'working').length;
   $('#stats').textContent = s.projects.length ? `${s.projects.length} platform${s.projects.length > 1 ? 's' : ''} · ${s.agents.length} agent${s.agents.length === 1 ? '' : 's'}${w ? ' · ' + w + ' working' : ''}` : '';
   $('#empty').hidden = s.projects.length > 0;
@@ -694,6 +717,16 @@ es.onerror = () => $('#conn').classList.remove('on');
 
 // ---------- Director chat ----------
 let chatOpen = true, chatSig = '';
+// chatStick = "the log follows the newest message": on while the view is at the bottom, off once the
+// user scrolls more than ~80px up from it, back on when they return there or the log jumps to the end.
+let chatStick = true;
+$('#chatLog').addEventListener('scroll', () => {
+  const log = $('#chatLog');
+  chatStick = log.scrollHeight - log.scrollTop - log.clientHeight <= 80;
+});
+function chatToBottom() { // #chatLog may just have become visible (display:none -> flex), so scroll on the next frame
+  requestAnimationFrame(() => { const log = $('#chatLog'); log.scrollTop = log.scrollHeight; });
+}
 // Message length limit comes from the server (state.maxMessageChars); 32000 if an older server doesn't send it.
 const DEFAULT_MAX_CHARS = 32000;
 let maxChars = DEFAULT_MAX_CHARS;
@@ -713,17 +746,21 @@ function updateChatCount() {
 function renderChat() {
   const msgs = state.chat, last = msgs.length ? msgs[msgs.length - 1].ts : 0;
   const sig = msgs.length + ':' + last;
+  const log = $('#chatLog');
   if (sig !== chatSig) {
     chatSig = sig;
-    const log = $('#chatLog'); log.replaceChildren();
+    const keep = log.scrollTop; // the rebuild below resets the scroll; restore it if the user is scrolled up
+    log.replaceChildren();
     for (const m of msgs) {
       const d = document.createElement('div'); d.className = 'msg ' + m.role;
       d.textContent = (m.role === 'user' ? 'You: ' : m.role === 'director' ? 'Director: ' : '') + m.text;
       log.append(d);
     }
-    log.scrollTop = log.scrollHeight;
+    log.scrollTop = chatStick ? log.scrollHeight : keep; // don't yank the view down while the user is scrolled up
   }
-  $('#chat').classList.toggle('open', chatOpen && msgs.length > 0);
+  const chat = $('#chat'), open = chatOpen && msgs.length > 0, wasOpen = chat.classList.contains('open');
+  chat.classList.toggle('open', open);
+  if (open && !wasOpen) chatToBottom(); // (re)opened, incl. first page load: log was display:none until now, so scroll on the next frame
   $('#chatToggle').textContent = chatOpen ? '▼' : '▲';
   const has = !!state.director, busy = state.busy;
   $('#chatIn').disabled = !has || busy; updateChatCount(); // also sets #chatSend disabled/title (no director / busy / over the limit)
@@ -737,7 +774,7 @@ async function sendChat() {
   const t = $('#chatIn').value.trim();
   if (!t || !state.director || state.busy) return;
   if (chatLen() > maxChars) { toast(`Message too long (${chatLen()} / ${maxChars} characters). Shorten it to send.`); return; }
-  try { await api('POST', '/api/chat', { text: t }); $('#chatIn').value = ''; chatOpen = true; } catch (e) { toast(e.message); }
+  try { await api('POST', '/api/chat', { text: t }); $('#chatIn').value = ''; chatOpen = true; chatStick = true; } catch (e) { toast(e.message); }
 }
 $('#chatSend').onclick = sendChat;
 $('#chatIn').addEventListener('keydown', e => {
@@ -748,30 +785,38 @@ $('#chatIn').addEventListener('keydown', e => {
 // (which sets chatIn.value directly and fires no input event) via a value setter on this one element.
 {
   const el = $('#chatIn'), nativeVal = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
-  Object.defineProperty(el, 'value', { configurable: true, get() { return nativeVal.get.call(this); }, set(v) { nativeVal.set.call(this, v); updateChatCount(); chatInFit(); } });
-  el.addEventListener('input', () => { updateChatCount(); chatInFit(); });
+  Object.defineProperty(el, 'value', { configurable: true, get() { return nativeVal.get.call(this); }, set(v) { nativeVal.set.call(this, v); if (v === '') chatInStick = true; updateChatCount(); chatInFit(true); } });
+  el.addEventListener('input', () => { updateChatCount(); chatInFit(el.selectionStart >= el.value.length); }); // typing mid-text: don't yank the view to the end
   setInterval(() => { if (micOn) updateChatCount(); }, 400); // belt and braces while recording
 }
 // ---- chat input sizing: auto-grow up to a max, manual drag handle, size persisted ----
 // chatInUserH = the height the user chose (drag handle, persisted). The box is never smaller than that,
-// grows with the content beyond it, and scrolls once it reaches the max.
-const CHATIN_MIN = 170;
-const chatInMax = () => Math.max(CHATIN_MIN, Math.round(innerHeight * 0.6));
-let chatInUserH = CHATIN_MIN, chatInDragging = false;
+// grows with the content beyond it only up to CHATIN_AUTO_MAX, then scrolls inside (overflow-y:auto in CSS).
+// The drag handle may go taller than that (up to 60% of the window). chatInStick = "follow the end of the text":
+// true until the user scrolls up inside the box, true again once they are back at the bottom or send.
+const CHATIN_MIN = 170, CHATIN_AUTO_MAX = 240;
+const chatInMax = () => Math.max(CHATIN_MIN, Math.round(innerHeight * 0.6)); // manual (drag) limit
+let chatInUserH = CHATIN_MIN, chatInDragging = false, chatInStick = true;
 try { const s = parseInt(localStorage.getItem('chatInputHeight'), 10); if (!isNaN(s)) chatInUserH = s; } catch (e) {}
-function chatInFit() {
+function chatInFit(follow) {
   const el = $('#chatIn'), max = chatInMax();
   const base = Math.max(CHATIN_MIN, Math.min(max, chatInUserH));
+  const keep = el.scrollTop; // resetting height to 'auto' below would clamp/reset it
   let h = base;
   if (!chatInDragging) {
     el.style.height = 'auto';
     const need = el.scrollHeight + (el.offsetHeight - el.clientHeight); // content + borders
-    h = Math.max(base, Math.min(max, need));
-    el.style.overflowY = need > max ? 'auto' : 'hidden';
-  } else el.style.overflowY = 'auto';
+    h = Math.max(base, Math.min(CHATIN_AUTO_MAX, need));
+  }
   el.style.height = h + 'px';
+  el.scrollTop = follow !== false && chatInStick ? el.scrollHeight : keep;
 }
-addEventListener('resize', chatInFit);
+{
+  const el = $('#chatIn');
+  // scroll events (wheel, keyboard, scrollbar) decide whether we keep following the end of the text
+  el.addEventListener('scroll', () => { chatInStick = el.scrollHeight - el.scrollTop - el.clientHeight <= 4; });
+}
+addEventListener('resize', () => chatInFit(false));
 {
   const handle = $('#chatInHandle'), el = $('#chatIn');
   let startY = 0, startH = 0;
@@ -844,8 +889,7 @@ function micOnResult(e) {
   }
   voiceInterim = interim;
   const input = $('#chatIn');
-  input.value = voiceBase + voiceFinal + voiceInterim;
-  input.scrollTop = input.scrollHeight; // keep the newest dictated text in view
+  input.value = voiceBase + voiceFinal + voiceInterim; // the value setter refits the box and follows the end (unless the user scrolled up)
 }
 function micOnError(e) {
   console.error('[mic] onerror', e, { error: e.error, message: e.message });
@@ -922,7 +966,9 @@ function refreshPanel() {
   const proj = state.projects.find(p => p.id === a.project);
   $('#pName').textContent = a.name;
   $('#pMeta').textContent = (proj ? proj.name + ' · ' : '') + (a.backend === 'mock' ? 'Mock worker' : `${backendLabel(a.backend)} · ${a.model}`);
-  const pill = $('#pStatus'); pill.textContent = a.status; pill.className = 'pill ' + a.status;
+  const vs = visualStatus(a); // expired 'done' / dismissed 'failed' show as idle; result text below is unaffected
+  const pill = $('#pStatus'); pill.textContent = vs; pill.className = 'pill ' + vs;
+  $('#pAck').hidden = a.status !== 'failed' || vs !== 'failed';
   $('#pDirTag').hidden = !a.isDirector;
   $('#pRole').textContent = a.role || '(none)';
   $('#taskBox').hidden = a.isDirector; $('#dirNote').hidden = !a.isDirector; $('#pDir').hidden = a.isDirector;
@@ -932,9 +978,9 @@ function refreshPanel() {
   else if (a.status === 'failed') { out.textContent = a.error || 'Failed'; out.className = 'err'; }
   else if (a.status === 'done') { out.textContent = a.output; out.className = ''; }
   else { out.textContent = 'No task run yet.'; out.className = 'mut'; }
-  const last = $('#pLastTask');
-  if ((a.status === 'done' || a.status === 'failed') && a.task) { last.textContent = 'Latest task: ' + a.task; last.hidden = false; }
-  else last.hidden = true;
+  const last = $('#pLastTask'), lastBox = $('#lastBox');
+  if ((a.status === 'done' || a.status === 'failed') && a.task) { last.textContent = 'Latest task: ' + a.task; lastBox.hidden = false; setLastOpen(lastOpen(a.id)); }
+  else lastBox.hidden = true;
   const mvSel = $('#pMove'), mvBox = $('#mvBox'), mvBtn = $('#pMoveBtn');
   mvSel.replaceChildren();
   const others = state.projects.filter(p => p.id !== a.project).sort((x, y) => x.name.localeCompare(y.name));
@@ -961,7 +1007,32 @@ function refreshPanel() {
     }
   }
 }
-setInterval(() => { const a = cur(); if (a && a.status === 'working') refreshPanel(); }, 1000);
+// "Latest task" block: collapsed by default (2-line preview + arrow); open/closed state is remembered per agent.
+const LAST_OPEN_KEY = 'lastTaskOpen';
+let lastOpenMap = {};
+try { lastOpenMap = JSON.parse(localStorage.getItem(LAST_OPEN_KEY)) || {}; } catch (e) { lastOpenMap = {}; }
+const lastOpen = id => !!lastOpenMap[id];
+function setLastOpen(open) {
+  $('#lastBox').classList.toggle('open', open);
+  $('#lastTog').textContent = open ? '▾' : '▸'; $('#lastTog').setAttribute('aria-expanded', String(open));
+}
+function toggleLast() {
+  if (!selected) return;
+  const open = !lastOpen(selected);
+  if (open) lastOpenMap[selected] = true; else delete lastOpenMap[selected];
+  try { localStorage.setItem(LAST_OPEN_KEY, JSON.stringify(lastOpenMap)); } catch (e) { /* ignore */ }
+  setLastOpen(open);
+}
+$('#lastTog').onclick = toggleLast; $('#pLastTask').onclick = toggleLast;
+// Dismiss the error badge of the selected agent; only the badge goes, task + result text stay.
+$('#pAck').onclick = () => { const a = cur(); if (!a || a.status !== 'failed') return; failedAck[a.id] = failKey(a); saveFailedAck(); refreshPanel(); if (selProj) refreshProj(); };
+let vsSig = '';
+setInterval(() => { // working: live timer; otherwise redraw the panel/list once when a done badge expires
+  const a = cur();
+  if (a && a.status === 'working') refreshPanel();
+  const sig = state.agents.map(x => x.id + visualStatus(x)).join();
+  if (sig !== vsSig) { vsSig = sig; if (a && a.status !== 'working') refreshPanel(); if (selProj) refreshProj(); }
+}, 1000);
 $('#pClose').onclick = closePanel; $('#jClose').onclick = closePanel;
 $('#pTask').addEventListener('input', () => { if (selected) drafts.set(selected, $('#pTask').value); });
 $('#pTask').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runTask(); } });
@@ -1002,7 +1073,7 @@ function refreshProj() {
   const list = agentsOf(p.id);
   if (!list.length) { const m = document.createElement('p'); m.className = 'mut'; m.textContent = 'No agents here yet.'; box.append(m); }
   for (const a of list) {
-    const b = document.createElement('button'); b.textContent = `${a.isDirector ? '♛ ' : ''}${a.name} · ${a.status}`;
+    const b = document.createElement('button'); b.textContent = `${a.isDirector ? '♛ ' : ''}${a.name} · ${visualStatus(a)}`;
     b.onclick = () => openPanel(a.id); box.append(b);
   }
 }
