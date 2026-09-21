@@ -1,6 +1,8 @@
 ﻿#!/usr/bin/env python3
 """Agent HQ: local server for a small company of AI agents grouped into project platforms."""
 import argparse
+import base64
+import binascii
 import json
 import os
 import queue
@@ -26,6 +28,14 @@ STATE_FILE = DATA_DIR / "state.json"
 LEGACY_FILE = DATA_DIR / "agents.json"
 NOTES_DIR = DATA_DIR / "notes"
 WORKSPACES = ROOT / "workspaces"
+# Chat image uploads: files live in uploads/, names are always server-side uuids (never client paths).
+UPLOAD_DIR = ROOT / "uploads"
+UPLOAD_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif"}
+UPLOAD_MIME_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # decoded image size
+MAX_UPLOAD_BODY = 16 * 1024 * 1024    # body limit for /api/upload_image: base64 is ~4/3 of the raw bytes
+UPLOAD_DIR.mkdir(exist_ok=True)
 HOST, PORT = "127.0.0.1", int(os.environ.get("AGENT_HQ_PORT") or 8765)
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
@@ -270,9 +280,12 @@ def broadcast():
             pass
 
 
-def add_chat(role, text):
+def add_chat(role, text, images=None):
     # user text is already length-checked in send_chat (never cut here); Director/system text keeps the 4000 cap
-    chat.append({"role": role, "text": text if role == "user" else text[:4000], "ts": time.time()})
+    msg = {"role": role, "text": text if role == "user" else text[:4000], "ts": time.time()}
+    if images:
+        msg["images"] = list(images)
+    chat.append(msg)
     del chat[:-MAX_CHAT]
 
 
@@ -579,11 +592,14 @@ def context_from(names, exclude):
     return "\n\n".join(parts)
 
 
-def begin_task(a, task, by="user", names=()):
+def begin_task(a, task, by="user", names=(), images=()):
     """Caller must hold the lock."""
     if a["status"] == "working":
         raise ApiError(409, "This agent is already working")
     prompt = task
+    img_lines = image_lines(images)
+    if img_lines:
+        prompt += "\n\n" + "\n".join(img_lines)
     ctx = context_from(list(names), a["id"])
     if ctx:
         prompt += "\n\nInformation from teammates (use it if it helps):\n" + ctx
@@ -634,6 +650,85 @@ def worker(agent_id, snap, task, prompt):
         try_review()
 
 
+# ---------- image uploads ----------
+
+def normalize_images(images):
+    """Validate an optional 'images' list from the client. Returns clean 'uploads/<name>' paths;
+    every name is re-checked against the uploads folder, so client input can never traverse."""
+    if images is None or (isinstance(images, (list, tuple)) and not len(images)):
+        return []
+    if not isinstance(images, list) or len(images) > 8:
+        raise ApiError(400, "images must be a list of at most 8 upload paths")
+    out = []
+    for item in images:
+        m = re.fullmatch(r"uploads/([\w.\-]{1,64})", str(item or "").strip().lstrip("/"))
+        if not m:
+            raise ApiError(400, f"Invalid image path ({str(item)[:40]})")
+        name = m.group(1)
+        try:
+            target = (UPLOAD_DIR / name).resolve()
+            target.relative_to(UPLOAD_DIR.resolve())
+        except (ValueError, OSError):
+            raise ApiError(403, "Forbidden") from None
+        if not target.is_file():
+            raise ApiError(404, f"Image not found: uploads/{name}")
+        if f"uploads/{name}" not in out:
+            out.append(f"uploads/{name}")
+    return out
+
+
+def image_lines(images):
+    """One '[Bild angehaengt: <absolute path>]' line per existing image. Used in the Director prompt
+    and in agent tasks so the agent can read the file with its tools; never clipped or omitted."""
+    lines = []
+    for rel in normalize_images(images):
+        lines.append(f"[Bild angehaengt: {(UPLOAD_DIR / rel.split('/', 1)[1]).resolve()}]")
+    return lines
+
+
+def message_prompt_text(m):
+    """One chat message for a prompt: text (owner uncut, other roles clipped) + image path lines,
+    which are appended after the clipping and therefore always survive it."""
+    text = re.sub(r"\s+", " ", m["text"])[:None if m["role"] == "user" else 700]
+    lines = image_lines(m.get("images"))
+    return "\n".join([text] + lines) if lines else text
+
+
+def upload_image(d):
+    if not isinstance(d, dict):
+        raise ApiError(400, "Invalid request")
+    data_url = d.get("data_url")
+    if not isinstance(data_url, str):
+        raise ApiError(400, "data_url must be a data:image/...;base64 string")
+    m = re.match(r"^data:(image/(?:png|jpe?g|webp|gif));base64,(.*)$", data_url.strip(), re.S)
+    if not m:
+        raise ApiError(415, "Only data URLs of type image/png, image/jpeg, image/webp or image/gif are allowed")
+    b64 = re.sub(r"\s+", "", m.group(2))
+    if not b64:
+        raise ApiError(400, "data_url contains no image data")
+    if len(b64) * 3 // 4 > MAX_UPLOAD_BYTES:
+        raise ApiError(413, f"Image is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+    try:
+        raw = base64.b64decode(b64 + "=" * (-len(b64) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(400, "data_url is not valid base64") from None
+    if not raw:
+        raise ApiError(400, "data_url contains no image data")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ApiError(413, f"Image is too large ({len(raw)} bytes, max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    while True:
+        name = f"{uuid.uuid4().hex}{UPLOAD_MIME_EXT[m.group(1)]}"
+        target = UPLOAD_DIR / name
+        if not target.exists():
+            break
+    try:
+        target.write_bytes(raw)
+    except OSError as e:
+        raise ApiError(500, f"Could not save the image: {e}") from None
+    return {"ok": True, "path": f"uploads/{name}", "url": f"/uploads/{name}"}
+
+
 # ---------- director ----------
 
 def build_director_prompt(d):
@@ -650,8 +745,8 @@ def build_director_prompt(d):
         platforms.append(f"- {p['name']} | id: {p['id']} | agents: {n}")
     label = {"user": "Owner", "director": "Director", "system": "System"}
     # Owner messages go to the Director in full (they were clipped to 700 chars before); other roles stay clipped.
-    convo = "\n".join(f"{label.get(m['role'], 'System')}: "
-                      f"{re.sub(r'\s+', ' ', m['text'])[:None if m['role'] == 'user' else 700]}" for m in chat[-14:])
+    # Image path lines are appended after the clip (see message_prompt_text), so they are never cut or lost.
+    convo = "\n".join(f"{label.get(m['role'], 'System')}: {message_prompt_text(m)}" for m in chat[-14:])
     extra = f"\n\nExtra instructions from the owner: {d['role']}" if d["role"] else ""
     return (f"{DIRECTOR_RULES}{extra}\n\nPLATFORMS:\n" + ("\n".join(platforms) or "(no platforms yet)") +
             "\n\nAGENTS:\n" + ("\n".join(roster) or "(no agents yet)") +
@@ -844,7 +939,8 @@ def run_action(act):
         if not isinstance(task, str) or not task.strip():
             return f"Skipped: empty task for {target['name']}."
         try:
-            begin_task(target, task.strip()[:MAX_MESSAGE_CHARS], by="director", names=act.get("include_notes_from") or [])
+            begin_task(target, task.strip()[:MAX_MESSAGE_CHARS], by="director",
+                       names=act.get("include_notes_from") or [], images=act.get("images"))
         except ApiError as e:
             return f"Could not assign to {target['name']}: {e.message}."
         return f"Assigned to {target['name']}: {task.strip()[:160]}"
@@ -993,13 +1089,14 @@ def start_task(agent_id, d):
         raise ApiError(400, "Task is empty")
     if len(task) > MAX_MESSAGE_CHARS:
         raise ApiError(400, f"Task is too long ({len(task)} characters, max {MAX_MESSAGE_CHARS})")
+    images = normalize_images(d.get("images")) if isinstance(d, dict) else []
     with lock:
         a = agents.get(agent_id)
         if not a:
             raise ApiError(404, "Agent not found")
         if a.get("isDirector"):
             raise ApiError(400, "Talk to the Director in the chat bar instead")
-        begin_task(a, task, by="user")
+        begin_task(a, task, by="user", images=images)
     return {"ok": True}
 
 
@@ -1050,7 +1147,8 @@ def delete_agent(agent_id):
 def send_chat(d):
     global auto_rounds, review_pending
     text = str(d.get("text", "")).strip() if isinstance(d, dict) else ""
-    if not text:
+    images = normalize_images(d.get("images")) if isinstance(d, dict) else []
+    if not text and not images:
         raise ApiError(400, "Message is empty")
     if len(text) > MAX_MESSAGE_CHARS:
         raise ApiError(400, f"Message is too long ({len(text)} characters, max {MAX_MESSAGE_CHARS})")
@@ -1059,7 +1157,7 @@ def send_chat(d):
             raise ApiError(400, "Make one agent the Director first")
         if director_busy:
             raise ApiError(409, "The Director is still busy")
-        add_chat("user", text)
+        add_chat("user", text, images)
         auto_rounds, review_pending = 0, False
         director_turn()
     return {"ok": True}
@@ -1088,6 +1186,7 @@ PROJECT_ROUTE = re.compile(rf"^/api/projects/{ID}$")
 PROJ_MOV_ROUTE = re.compile(rf"^/api/projects/{ID}/move$")
 NOTES_ROUTE = re.compile(rf"^/api/notes/{ID}$")
 MODELS_ROUTE = re.compile(r"^/api/models/(gemini|openrouter|opencode|opencode-readonly|claude)$")
+UPLOAD_ROUTE = re.compile(r"^/uploads/([\w.\-]+)$")
 
 
 PLATFORMS_DIR = ROOT / "platforms"  # experimental variants / screenshots (platforms/coding/)
@@ -1138,11 +1237,11 @@ class Handler(BaseHTTPRequestHandler):
             if origin and origin not in ALLOWED_ORIGINS:
                 raise ApiError(403, "Bad origin")
 
-    def _read_json(self):
+    def _read_json(self, limit=None):
         if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
             raise ApiError(415, "Content-Type must be application/json")
         length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
+        if length > (limit or MAX_BODY):
             raise ApiError(413, "Request body too large")
         try:
             return json.loads(self.rfile.read(length) or b"{}")
@@ -1200,6 +1299,20 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "Not found")
         self._send(200, target.read_bytes(), ctype)
 
+    def _serve_upload(self, name):
+        # the route regex already blocks / and \, so only '..' style names can reach the resolve check
+        try:
+            target = (UPLOAD_DIR / name).resolve()
+            target.relative_to(UPLOAD_DIR.resolve())
+        except (ValueError, OSError):
+            raise ApiError(403, "Forbidden") from None
+        if not target.is_file():
+            raise ApiError(404, "Not found")
+        ctype = UPLOAD_TYPES.get(target.suffix.lower())
+        if ctype is None:
+            raise ApiError(404, "Not found")
+        self._send(200, target.read_bytes(), ctype)
+
     def _get(self):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/index.html"):
@@ -1215,6 +1328,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, (PLATFORMS_DIR / "coding" / name).read_bytes(), "text/html; charset=utf-8")
         elif path.startswith("/platforms/"):
             self._serve_platforms(path)
+        elif UPLOAD_ROUTE.match(path):
+            self._serve_upload(UPLOAD_ROUTE.match(path).group(1))
         elif path.startswith("/vendor/"):
             self._serve_vendor(path)
         elif path == "/api/state":
@@ -1239,6 +1354,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(201, create_agent(self._read_json()))
         elif path == "/api/chat":
             self._json(202, send_chat(self._read_json()))
+        elif path == "/api/upload_image":
+            self._json(201, upload_image(self._read_json(MAX_UPLOAD_BODY)))
         elif path == "/api/autoreview":
             data = self._read_json()
             with lock:
