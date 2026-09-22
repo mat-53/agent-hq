@@ -5,3 +5,9 @@ certs/
 uploads/
 __pycache__/
 *.pyc
+*.key
+*.pem
+secrets*
+state.json
+data/state.json
+logs/
