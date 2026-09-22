@@ -1,0 +1,1 @@
+Local orchestration layer for AI agent fleets: one expensive Director model plans, delegates tasks, and reviews results, while cheap or free worker agents grouped into Research, Coding, Debugging, Tester, and Presentations platforms do the actual work, verified end-to-end so long unattended runs stay within the owner's usage budget.
