@@ -1,5 +1,7 @@
 # Agent HQ
 
+![Agent HQ workflow hierarchy](docs/images/agent-hq-workflow.jpg)
+
 A local orchestration layer where one expensive AI model plans and delegates, and a fleet of cheap or free agents does the actual work.
 
 ## Why
